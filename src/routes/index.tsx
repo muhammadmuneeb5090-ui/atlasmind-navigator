@@ -1,24 +1,43 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { AtlasMindLogo } from "@/components/atlasmind/Logo";
 
-// No head() here: the home route inherits title/description/og/twitter from
-// __root.tsx, and ships no og:image so serve-time hosting can inject the
-// project's social preview (explicit og:image or latest screenshot).
+const AtlasMindApp = lazy(() => import("@/components/atlasmind/AtlasMindApp"));
+
 export const Route = createFileRoute("/")({
   component: Index,
 });
 
-// IMPORTANT: Replace this placeholder. See ./README.md for routing conventions.
-function Index() {
+function BootScreen() {
   return (
     <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        display: "grid",
+        placeItems: "center",
+        background: "#0a0e1a",
+        color: "#eeece4",
+      }}
     >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
+      <div style={{ display: "grid", placeItems: "center", gap: 14 }}>
+        <AtlasMindLogo size={64} />
+        <div className="am-font-display am-accent-text" style={{ fontSize: 24, fontWeight: 700 }}>
+          AtlasMind
+        </div>
+        <div style={{ fontSize: 12, color: "#8b93a3" }}>Preparing your world…</div>
+      </div>
     </div>
+  );
+}
+
+function Index() {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted) return <BootScreen />;
+  return (
+    <Suspense fallback={<BootScreen />}>
+      <AtlasMindApp />
+    </Suspense>
   );
 }
