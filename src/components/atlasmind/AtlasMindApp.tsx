@@ -214,8 +214,8 @@ export default function AtlasMindApp() {
     });
 
     // Fix default icon path for any raw markers
-    // @ts-expect-error internal
-    delete L.Icon.Default.prototype._getIconUrl;
+    delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })
+      ._getIconUrl;
     L.Icon.Default.mergeOptions({
       iconRetinaUrl:
         "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
