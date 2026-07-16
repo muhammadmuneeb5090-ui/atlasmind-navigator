@@ -183,8 +183,9 @@ export default function AtlasMindApp() {
 
     routeEndpointsRef.current = L.layerGroup().addTo(map);
 
-    // @ts-expect-error markercluster plugin
-    clusterRef.current = L.markerClusterGroup({
+    clusterRef.current = (L as unknown as {
+      markerClusterGroup: (opts: unknown) => L.LayerGroup;
+    }).markerClusterGroup({
       showCoverageOnHover: false,
       spiderfyOnMaxZoom: true,
       maxClusterRadius: 55,
