@@ -422,14 +422,14 @@ export default function AtlasMindApp() {
       const lower = n.toLowerCase();
       const LOCAL_CTX = "Latifabad, Hyderabad, Sindh, Pakistan";
       // "Unit N" → expand into the local Latifabad context so OSM can resolve it
-      const unitMatch = lower.match(/^unit\s*([0-9a-z]+)$/);
-      if (unitMatch) {
+      const unitNumMatch = lower.match(/unit\s*(?:no\.?\s*)?#?\s*([0-9]+)/);
+      if (unitNumMatch) {
+        const num = unitNumMatch[1];
         return [
-          `Latifabad ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
-          `Latifabad Unit ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
-          `Latifabad Unit No ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
-          `Unit ${unitMatch[1]}, Latifabad, Hyderabad, Sindh, Pakistan`,
-          `Unit ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
+          `Latifabad Unit No ${num}, Hyderabad, Sindh, Pakistan`,
+          `Latifabad Unit ${num}, Hyderabad, Sindh, Pakistan`,
+          `Latifabad ${num}, Hyderabad, Sindh, Pakistan`,
+          `Unit ${num}, Latifabad, Hyderabad, Sindh, Pakistan`,
         ];
       }
       // Short local queries: try raw first, then a context-expanded variant
