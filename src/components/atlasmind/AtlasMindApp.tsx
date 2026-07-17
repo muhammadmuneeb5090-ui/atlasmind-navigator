@@ -463,8 +463,9 @@ export default function AtlasMindApp() {
           signal: ac.signal,
         });
         if (!r.ok) throw new Error(`Search failed (${r.status})`);
-        j = (await r.json()) as SearchResult[];
-        if (j.length > 0) break;
+        const partial = (await r.json()) as SearchResult[];
+        j = j.concat(partial);
+        if (j.length >= 5) break;
       }
       if (ac.signal.aborted) return;
       // Deduplicate and rank by token overlap for partial / fuzzy matching
