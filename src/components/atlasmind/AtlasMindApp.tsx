@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet.markercluster";
 import { AtlasMindLogo } from "./Logo";
+import { TrafficDashboard } from "./TrafficDashboard";
 
 type LatLng = { lat: number; lng: number };
 type SearchResult = {
@@ -137,6 +138,9 @@ export default function AtlasMindApp() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const searchLastQRef = useRef<string>("");
+  const searchDebounceRef = useRef<number | null>(null);
 
   // Routing
   const [routeFrom, setRouteFrom] = useState<{ label: string; ll: LatLng } | null>(null);
@@ -308,25 +312,71 @@ export default function AtlasMindApp() {
     );
   }, [showToast]);
 
-  /* ---- Search ---- */
-  const doSearch = useCallback(async (q: string) => {
-    if (!q.trim()) return;
+  /* ---- Search ----
+   * Nominatim rate-limits rapid requests, so:
+   *  - debounce keystrokes ~500ms
+   *  - skip if the same query is already in flight
+   *  - abort any previous inflight request when a newer one starts
+   *  - surface a clear "search failed, try again" message on failure
+   */
+  const doSearch = useCallback(async (rawQ: string) => {
+    const q = rawQ.trim();
+    if (!q) {
+      setSearchResults([]);
+      setSearchError(null);
+      return;
+    }
+    if (searchLastQRef.current === q && searchAbortRef.current) return;
+    searchAbortRef.current?.abort();
+    const ac = new AbortController();
+    searchAbortRef.current = ac;
+    searchLastQRef.current = q;
     setSearchLoading(true);
     setSearchError(null);
     try {
       const url = `https://nominatim.openstreetmap.org/search?format=json&limit=8&q=${encodeURIComponent(q)}`;
-      const r = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!r.ok) throw new Error("Search failed");
+      const r = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: ac.signal,
+      });
+      if (!r.ok) throw new Error(`Search failed (${r.status})`);
       const j = (await r.json()) as SearchResult[];
+      if (ac.signal.aborted) return;
       setSearchResults(j);
-      if (j.length === 0) setSearchError("No results found");
+      if (j.length === 0) setSearchError("No results found — try a different query");
     } catch (e: any) {
-      setSearchError(e.message || "Search failed");
+      if (e?.name === "AbortError") return;
       setSearchResults([]);
+      setSearchError("Search failed — please try again in a moment");
     } finally {
-      setSearchLoading(false);
+      if (searchAbortRef.current === ac) {
+        searchAbortRef.current = null;
+        setSearchLoading(false);
+      }
     }
   }, []);
+
+  // Debounced live search as the user types
+  useEffect(() => {
+    if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
+    const q = searchQ.trim();
+    if (!q) {
+      searchAbortRef.current?.abort();
+      searchAbortRef.current = null;
+      searchLastQRef.current = "";
+      setSearchResults([]);
+      setSearchError(null);
+      setSearchLoading(false);
+      return;
+    }
+    if (q.length < 2) return;
+    searchDebounceRef.current = window.setTimeout(() => {
+      doSearch(q);
+    }, 500);
+    return () => {
+      if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
+    };
+  }, [searchQ, doSearch]);
 
   const flyToResult = useCallback((r: SearchResult, dropMarker = true) => {
     if (!mapRef.current) return;
@@ -839,22 +889,7 @@ export default function AtlasMindApp() {
         )}
 
         {tab === "traffic" && (
-          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
-            <div className="am-card" style={{ cursor: "default" }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>🚦 Traffic estimate</div>
-              <div style={{ fontSize: 12, color: "var(--am-muted)", marginTop: 4 }}>
-                {routeInfo
-                  ? `Estimated ${fmtDuration(routeInfo.duration)} for ${fmtDistance(routeInfo.distance)} based on OSRM driving-time model. Add ~15% during 08:00–10:00 and 17:00–19:00.`
-                  : "Build a route to see travel-time estimates."}
-              </div>
-            </div>
-            <div className="am-card" style={{ cursor: "default" }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>🌦 Weather impact</div>
-              <div style={{ fontSize: 12, color: "var(--am-muted)", marginTop: 4 }}>
-                {advisory?.headline ?? "Move the map to sample conditions."} · {advisory?.summary ?? "—"}
-              </div>
-            </div>
-          </div>
+          <TrafficDashboard map={mapRef.current} active={tab === "traffic"} />
         )}
       </div>
 
