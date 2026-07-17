@@ -76,7 +76,7 @@ function themeTiles(theme: "dark" | "light") {
     };
   }
   return {
-    url: "https://{s}.basemaps.cartocdn.com/voyager/{z}/{x}/{y}{r}.png",
+    url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
     attribution:
       '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
   };
@@ -167,8 +167,8 @@ export default function AtlasMindApp() {
   useEffect(() => {
     if (!mapEl.current || mapRef.current) return;
     const map = L.map(mapEl.current, {
-      center: [20, 0],
-      zoom: 3,
+      center: [25.383, 68.356],
+      zoom: 12,
       zoomControl: false,
       worldCopyJump: true,
       preferCanvas: true,
@@ -452,8 +452,17 @@ export default function AtlasMindApp() {
       setNearbyResults([]);
       clusterRef.current?.clearLayers();
       try {
-        const b = mapRef.current.getBounds();
-        const vb = `${b.getWest()},${b.getNorth()},${b.getEast()},${b.getSouth()}`;
+        // Build a viewbox around the current map center (~15 km box) so
+        // Nominatim always returns results near what the user is looking at,
+        // even if they've zoomed out.
+        const c = mapRef.current.getCenter();
+        const dLat = 0.135; // ~15 km
+        const dLng = 0.135 / Math.max(0.2, Math.cos((c.lat * Math.PI) / 180));
+        const west = c.lng - dLng;
+        const east = c.lng + dLng;
+        const north = c.lat + dLat;
+        const south = c.lat - dLat;
+        const vb = `${west},${north},${east},${south}`;
         const url = `https://nominatim.openstreetmap.org/search?format=json&limit=40&q=${encodeURIComponent(cat.query)}&viewbox=${vb}&bounded=1`;
         const r = await fetch(url, { headers: { Accept: "application/json" } });
         if (!r.ok) throw new Error("Nearby search failed");
