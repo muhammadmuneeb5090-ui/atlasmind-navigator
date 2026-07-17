@@ -41,6 +41,7 @@ Deno.serve(async (req: Request) => {
     groqForm.append("file", file, file.name || "audio.webm");
     groqForm.append("model", "whisper-large-v3");
     groqForm.append("response_format", "json");
+    groqForm.append("language", "en");
 
     const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
