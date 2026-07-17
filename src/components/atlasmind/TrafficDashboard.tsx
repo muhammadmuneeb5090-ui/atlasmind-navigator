@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import type L from "leaflet";
+
+type Level = "light" | "moderate" | "heavy";
 
 type Road = {
   id: number;
@@ -8,7 +9,15 @@ type Road = {
   highway: string;
 };
 
-type Level = "light" | "moderate" | "heavy";
+// Fixed, curated list of representative nearby roads. No network request is
+// made — congestion is derived purely from time of day and day of week.
+const ROADS: Road[] = [
+  { id: 1, name: "University Road", ref: "M-9", highway: "primary" },
+  { id: 2, name: "Main Boulevard", ref: "N-5", highway: "trunk" },
+  { id: 3, name: "Airport Link", ref: "M-2", highway: "motorway" },
+  { id: 4, name: "Jail Road", highway: "secondary" },
+  { id: 5, name: "Garden Town Lane", highway: "residential" },
+];
 
 /**
  * Time-of-day + day-of-week based congestion estimate.
@@ -64,10 +73,7 @@ const LEVEL_COLOR: Record<Level, string> = {
   heavy: "#ff2d55",
 };
 
-export function TrafficDashboard({ map, active }: { map: L.Map | null; active: boolean }) {
-  const [roads, setRoads] = useState<Road[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+export function TrafficDashboard({ active }: { active: boolean }) {
   const [tick, setTick] = useState(0);
 
   // Re-evaluate congestion every 60s so the bars stay current if left open
@@ -76,63 +82,6 @@ export function TrafficDashboard({ map, active }: { map: L.Map | null; active: b
     const id = window.setInterval(() => setTick((t) => t + 1), 60_000);
     return () => window.clearInterval(id);
   }, [active]);
-
-  useEffect(() => {
-    if (!active || !map) return;
-    let cancelled = false;
-    const c = map.getCenter();
-    setLoading(true);
-    setError(null);
-    const query = `[out:json][timeout:15];
-way(around:2500,${c.lat.toFixed(4)},${c.lng.toFixed(4)})
-  [highway~"^(motorway|trunk|primary|secondary|tertiary)$"][name];
-out tags 25;`;
-    fetch("https://overpass-api.de/api/interpreter", {
-      method: "POST",
-      body: query,
-    })
-      .then((r) => {
-        if (!r.ok) throw new Error(`Overpass ${r.status}`);
-        return r.json();
-      })
-      .then((j) => {
-        if (cancelled) return;
-        const seen = new Set<string>();
-        const out: Road[] = [];
-        for (const el of j.elements || []) {
-          const tags = el.tags || {};
-          const name = tags.name as string | undefined;
-          if (!name) continue;
-          const key = name.toLowerCase();
-          if (seen.has(key)) continue;
-          seen.add(key);
-          out.push({
-            id: el.id,
-            name,
-            ref: tags.ref,
-            highway: tags.highway,
-          });
-          if (out.length >= 5) break;
-        }
-        if (out.length === 0) {
-          setError("No named roads found in this area — pan the map and reopen.");
-          setRoads([]);
-        } else {
-          setRoads(out);
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setError("Couldn't reach traffic data service — try again in a moment.");
-        setRoads([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [active, map]);
 
   const timestamp = useMemo(() => {
     void tick;
@@ -182,81 +131,70 @@ out tags 25;`;
         </div>
       </div>
 
-      {loading && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
-          <span className="am-spinner" /> Scanning roads around you…
-        </div>
-      )}
-      {error && !loading && (
-        <div style={{ color: "#ff8a95", fontSize: 13 }}>{error}</div>
-      )}
-
-      {roads && roads.length > 0 && (
-        <div style={{ display: "grid", gap: 8 }}>
-          {roads.map((road) => {
-            const c = congestionFor(road.highway);
-            return (
-              <div key={road.id} className="am-card" style={{ cursor: "default" }}>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "baseline",
-                    gap: 8,
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 600,
-                        whiteSpace: "nowrap",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                      }}
-                    >
-                      {road.ref ? `${road.ref} · ` : ""}
-                      {road.name}
-                    </div>
-                    <div style={{ fontSize: 11, color: "var(--am-muted)", textTransform: "capitalize" }}>
-                      {road.highway} road
-                    </div>
-                  </div>
+      <div style={{ display: "grid", gap: 8 }}>
+        {ROADS.map((road) => {
+          const c = congestionFor(road.highway);
+          return (
+            <div key={road.id} className="am-card" style={{ cursor: "default" }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "baseline",
+                  gap: 8,
+                }}
+              >
+                <div style={{ minWidth: 0 }}>
                   <div
                     style={{
-                      fontSize: 12,
+                      fontSize: 13,
                       fontWeight: 600,
-                      color: LEVEL_COLOR[c.level],
                       whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
                     }}
                   >
-                    {c.label} · {c.pct}%
+                    {road.ref ? `${road.ref} · ` : ""}
+                    {road.name}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--am-muted)", textTransform: "capitalize" }}>
+                    {road.highway} road
                   </div>
                 </div>
                 <div
                   style={{
-                    marginTop: 8,
-                    height: 6,
-                    borderRadius: 999,
-                    background: "rgba(139,147,163,0.18)",
-                    overflow: "hidden",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: LEVEL_COLOR[c.level],
+                    whiteSpace: "nowrap",
                   }}
                 >
-                  <div
-                    style={{
-                      width: `${c.pct}%`,
-                      height: "100%",
-                      background: LEVEL_COLOR[c.level],
-                      boxShadow: `0 0 12px ${LEVEL_COLOR[c.level]}80`,
-                      transition: "width .6s cubic-bezier(.2,.7,.2,1)",
-                    }}
-                  />
+                  {c.label} · {c.pct}%
                 </div>
               </div>
-            );
-          })}
-        </div>
-      )}
+              <div
+                style={{
+                  marginTop: 8,
+                  height: 6,
+                  borderRadius: 999,
+                  background: "rgba(139,147,163,0.18)",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    width: `${c.pct}%`,
+                    height: "100%",
+                    background: LEVEL_COLOR[c.level],
+                    boxShadow: `0 0 12px ${LEVEL_COLOR[c.level]}80`,
+                    transition: "width .6s cubic-bezier(.2,.7,.2,1)",
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
 
       <div style={{ fontSize: 10, color: "var(--am-muted)", lineHeight: 1.5 }}>
         Modeled from typical weekday commute patterns (busier 7–9 AM and 5–8 PM, Friday 12–2 PM).

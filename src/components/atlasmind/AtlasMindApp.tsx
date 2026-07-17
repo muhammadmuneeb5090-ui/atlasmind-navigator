@@ -3,6 +3,34 @@ import L from "leaflet";
 import "leaflet.markercluster";
 import { AtlasMindLogo } from "./Logo";
 import { TrafficDashboard } from "./TrafficDashboard";
+import { Modal, ChipButton } from "./Modal";
+import { MapActionModal, type MapAction } from "./MapActionModal";
+import { SosModal } from "./SosModal";
+import { VoiceSearch } from "./VoiceSearch";
+import {
+  createMeasureTool,
+  fmtMeasure,
+  type MeasureState,
+} from "./MeasureTool";
+import {
+  fetchCommunityReports,
+  deleteCommunityReport,
+  fetchPlaces,
+  confirmPlace,
+  hasConfirmed,
+  addFavorite,
+  fetchFavorites,
+  removeFavorite,
+  isFavorite,
+  logRoute,
+  fetchRouteHistory,
+  clearRouteHistory,
+  type CommunityReport,
+  type Place,
+  type Favorite,
+  type RouteHistoryRow,
+  type ReportCategory,
+} from "@/lib/db";
 
 type LatLng = { lat: number; lng: number };
 type SearchResult = {
@@ -32,7 +60,30 @@ const NEARBY: NearbyCategory[] = [
   { key: "mosque", label: "Mosque", icon: "🕌", query: "mosque" },
 ];
 
-type Tab = "search" | "route" | "nearby" | "tips" | "traffic";
+type Tab =
+  | "search"
+  | "route"
+  | "nearby"
+  | "tips"
+  | "traffic"
+  | "community"
+  | "places"
+  | "favorites"
+  | "history"
+  | "measure";
+
+type ReportMeta = { key: ReportCategory; label: string; icon: string; color: string };
+const REPORT_META: ReportMeta[] = [
+  { key: "road_damage", label: "Road Damage", icon: "🚧", color: "#ff8a95" },
+  { key: "flood", label: "Flood", icon: "🌊", color: "#00d4ff" },
+  { key: "construction", label: "Construction", icon: "🏗️", color: "#f5b301" },
+  { key: "parking", label: "Parking", icon: "🅿️", color: "#6c5ce7" },
+  { key: "safety", label: "Safety", icon: "⚠️", color: "#ff2d55" },
+  { key: "facilities", label: "Facilities", icon: "🏛️", color: "#22c55e" },
+];
+function reportMeta(cat: ReportCategory): ReportMeta {
+  return REPORT_META.find((r) => r.key === cat) ?? REPORT_META[0];
+}
 
 function fmtDistance(m: number) {
   if (m < 1000) return `${Math.round(m)} m`;
@@ -161,6 +212,36 @@ export default function AtlasMindApp() {
   const [advisory, setAdvisory] = useState<{ headline: string; summary: string } | null>(null);
   const [advisoryLoading, setAdvisoryLoading] = useState(false);
 
+  // Community reports + places (shared, DB-backed)
+  const [reports, setReports] = useState<CommunityReport[]>([]);
+  const [places, setPlaces] = useState<Place[]>([]);
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [placesLoading, setPlacesLoading] = useState(false);
+  const reportsLayerRef = useRef<L.LayerGroup | null>(null);
+  const placesLayerRef = useRef<L.LayerGroup | null>(null);
+  const communityClusterRef = useRef<any>(null);
+  const placeClusterRef = useRef<any>(null);
+  const confirmedPlacesRef = useRef<Set<string>>(new Set());
+
+  // Map action modal (report / add place) opened by tapping the map
+  const [mapAction, setMapAction] = useState<MapAction>(null);
+
+  // SOS modal
+  const [sosOpen, setSosOpen] = useState(false);
+
+  // Favorites
+  const [favorites, setFavorites] = useState<Favorite[]>([]);
+  const [favoritesLoading, setFavoritesLoading] = useState(false);
+  const favoriteIdsRef = useRef<Set<string>>(new Set());
+
+  // Route history
+  const [routeHistory, setRouteHistory] = useState<RouteHistoryRow[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  // Distance measurement
+  const [measureState, setMeasureState] = useState<MeasureState | null>(null);
+  const measureToolRef = useRef<ReturnType<typeof createMeasureTool> | null>(null);
+
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     window.clearTimeout((showToast as any)._t);
@@ -196,7 +277,20 @@ export default function AtlasMindApp() {
     });
     map.addLayer(clusterRef.current);
 
+    // Separate cluster layers for community reports and user-added places
+    communityClusterRef.current = (L as unknown as {
+      markerClusterGroup: (opts: unknown) => L.LayerGroup;
+    }).markerClusterGroup({
+      showCoverageOnHover: false,
+      spiderfyOnMaxZoom: true,
+      maxClusterRadius: 50,
+    });
+    map.addLayer(communityClusterRef.current);
+    placesLayerRef.current = L.layerGroup().addTo(map);
+
     map.on("click", (e: L.LeafletMouseEvent) => {
+      // Don't open the action modal while the measure tool is capturing clicks
+      if (measureToolRef.current?.isActive()) return;
       const { lat, lng } = e.latlng;
       if (clickMarkerRef.current) clickMarkerRef.current.remove();
       clickMarkerRef.current = L.marker([lat, lng], { icon: pinIcon("#00d4ff") })
@@ -207,7 +301,7 @@ export default function AtlasMindApp() {
           offset: [0, -28],
         })
         .openTooltip();
-      showToast(`📍 ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+      setMapAction({ type: "report", lat, lng });
     });
 
     // initial weather at world center — will refresh on move
@@ -458,6 +552,17 @@ export default function AtlasMindApp() {
 
       mapRef.current.fitBounds(L.latLngBounds(coords), { padding: [80, 80] });
       setRouteInfo({ distance: route.distance, duration: route.duration });
+      // Persist completed route to history
+      logRoute({
+        from_label: from.label,
+        to_label: to.label,
+        from_lat: from.ll.lat,
+        from_lng: from.ll.lng,
+        to_lat: to.ll.lat,
+        to_lng: to.ll.lng,
+        distance_m: route.distance,
+        duration_s: route.duration,
+      }).then(() => loadRouteHistory());
     } catch (e: any) {
       setRouteError(e.message || "Routing failed");
     } finally {
@@ -490,6 +595,160 @@ export default function AtlasMindApp() {
     setRouteFromQ("");
     setRouteToQ("");
     setRouteError(null);
+  }, []);
+
+  /* ---- Community reports + places loaders ---- */
+  const loadReports = useCallback(async () => {
+    setReportsLoading(true);
+    const data = await fetchCommunityReports();
+    setReports(data);
+    setReportsLoading(false);
+    // render markers
+    if (communityClusterRef.current) {
+      communityClusterRef.current.clearLayers();
+      data.forEach((r) => {
+        const meta = reportMeta(r.category);
+        const m = L.marker([r.lat, r.lng], { icon: pinIcon(meta.color) })
+          .bindPopup(`<strong>${meta.icon} ${meta.label}</strong>${r.description ? `<br/>${r.description}` : ""}<br/><small>${new Date(r.created_at).toLocaleString()}</small>`);
+        communityClusterRef.current.addLayer(m);
+      });
+    }
+  }, []);
+
+  const loadPlaces = useCallback(async () => {
+    setPlacesLoading(true);
+    const data = await fetchPlaces();
+    setPlaces(data);
+    setPlacesLoading(false);
+    if (placesLayerRef.current) {
+      placesLayerRef.current.clearLayers();
+      data.forEach((p) => {
+        const color = p.status === "verified" ? "#22c55e" : "#f5b301";
+        const icon = L.divIcon({
+          html: `<div style="width:26px;height:26px;transform:translate(-50%,-100%);">
+            <svg viewBox="0 0 24 32" width="26" height="32" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 0C5.4 0 0 5.4 0 12c0 8.8 12 20 12 20s12-11.2 12-20C24 5.4 18.6 0 12 0z" fill="${color}"/>
+              <circle cx="12" cy="12" r="4.5" fill="#fff"/>
+            </svg></div>`,
+          className: "am-pin",
+          iconSize: [26, 32],
+          iconAnchor: [13, 32],
+        });
+        const m = L.marker([p.lat, p.lng], { icon })
+          .bindPopup(`<strong>${p.name}</strong><br/>${p.category} · ${p.status}<br/><small>Confirmations: ${p.confirmation_count}/3</small>`);
+        placesLayerRef.current!.addLayer(m);
+      });
+    }
+    // refresh which places this device has already confirmed
+    const confirmed = new Set<string>();
+    for (const p of data) {
+      if (await hasConfirmed(p.id)) confirmed.add(p.id);
+    }
+    confirmedPlacesRef.current = confirmed;
+  }, []);
+
+  const handleConfirmPlace = useCallback(
+    async (placeId: string) => {
+      if (confirmedPlacesRef.current.has(placeId)) {
+        showToast("You already confirmed this place");
+        return;
+      }
+      const { confirmed } = await confirmPlace(placeId);
+      if (confirmed) {
+        showToast("Place confirmed!");
+        loadPlaces();
+      } else {
+        showToast("Could not confirm — try again");
+      }
+    },
+    [loadPlaces, showToast],
+  );
+
+  const handleDeleteReport = useCallback(
+    async (id: string) => {
+      const ok = await deleteCommunityReport(id);
+      if (ok) {
+        showToast("Report removed");
+        loadReports();
+      } else {
+        showToast("Could not remove report");
+      }
+    },
+    [loadReports, showToast],
+  );
+
+  /* ---- Favorites ---- */
+  const loadFavorites = useCallback(async () => {
+    setFavoritesLoading(true);
+    const data = await fetchFavorites();
+    setFavorites(data);
+    favoriteIdsRef.current = new Set(data.map((f) => `${f.lat}|${f.lng}`));
+    setFavoritesLoading(false);
+  }, []);
+
+  const toggleFavorite = useCallback(
+    async (name: string, lat: number, lng: number) => {
+      const key = `${lat}|${lng}`;
+      if (favoriteIdsRef.current.has(key)) {
+        // find and remove
+        const fav = favorites.find((f) => `${f.lat}|${f.lng}` === key);
+        if (fav) {
+          await removeFavorite(fav.id);
+          showToast("Removed from favorites");
+        }
+      } else {
+        const added = await addFavorite({ name, lat, lng });
+        if (added) showToast("Added to favorites");
+        else showToast("Already in favorites");
+      }
+      loadFavorites();
+    },
+    [favorites, loadFavorites, showToast],
+  );
+
+  /* ---- Route history ---- */
+  const loadRouteHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    const data = await fetchRouteHistory();
+    setRouteHistory(data);
+    setHistoryLoading(false);
+  }, []);
+
+  const rerunHistoryRoute = useCallback(
+    (row: RouteHistoryRow) => {
+      setRouteFrom({ label: row.from_label, ll: { lat: row.from_lat, lng: row.from_lng } });
+      setRouteFromQ(row.from_label);
+      setRouteTo({ label: row.to_label, ll: { lat: row.to_lat, lng: row.to_lng } });
+      setRouteToQ(row.to_label);
+      setTab("route");
+      setTimeout(() => buildRoute(), 100);
+    },
+    [buildRoute],
+  );
+
+  /* ---- Load DB data on mount ---- */
+  useEffect(() => {
+    loadReports();
+    loadPlaces();
+    loadFavorites();
+    loadRouteHistory();
+  }, [loadReports, loadPlaces, loadFavorites, loadRouteHistory]);
+
+  /* ---- Distance measurement tool lifecycle ---- */
+  const toggleMeasure = useCallback(() => {
+    if (!mapRef.current) return;
+    if (!measureToolRef.current) {
+      measureToolRef.current = createMeasureTool(mapRef.current, setMeasureState);
+    }
+    measureToolRef.current.toggle();
+  }, []);
+
+  const resetMeasure = useCallback(() => {
+    measureToolRef.current?.reset();
+  }, []);
+
+  const flyToCoords = useCallback((lat: number, lng: number) => {
+    mapRef.current?.flyTo([lat, lng], 15, { duration: 1.3 });
   }, []);
 
   /* ---- Nearby ---- */
@@ -631,8 +890,8 @@ export default function AtlasMindApp() {
         </button>
         <button
           className="am-btn am-btn-danger"
-          onClick={triggerSOS}
-          title="SOS — share your location"
+          onClick={() => setSosOpen(true)}
+          title="SOS — find nearest help & share location"
         >
           🆘 SOS
         </button>
@@ -720,6 +979,11 @@ export default function AtlasMindApp() {
             ["search", "🔍 Search"],
             ["route", "🧭 Route"],
             ["nearby", "📍 Nearby"],
+            ["community", "📢 Reports"],
+            ["places", "✨ Places"],
+            ["favorites", "★ Favorites"],
+            ["history", "🕘 History"],
+            ["measure", "📏 Measure"],
             ["tips", "💡 Local Tips"],
             ["traffic", "🚦 Traffic"],
           ] as [Tab, string][]).map(([k, label]) => (
@@ -748,6 +1012,12 @@ export default function AtlasMindApp() {
                 value={searchQ}
                 onChange={(e) => setSearchQ(e.target.value)}
               />
+              <VoiceSearch
+                onTranscript={(text) => {
+                  setSearchQ(text);
+                  doSearch(text);
+                }}
+              />
               <button className="am-btn am-btn-primary" type="submit" disabled={searchLoading}>
                 {searchLoading ? <span className="am-spinner" /> : "Search"}
               </button>
@@ -760,20 +1030,41 @@ export default function AtlasMindApp() {
                 className="am-scroll"
                 style={{ marginTop: 10, maxHeight: 220, overflowY: "auto", display: "grid", gap: 8 }}
               >
-                {searchResults.map((r) => (
-                  <div
-                    key={r.place_id}
-                    className="am-card"
-                    onClick={() => flyToResult(r)}
-                  >
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>
-                      {r.display_name.split(",")[0]}
+                {searchResults.map((r) => {
+                  const lat = parseFloat(r.lat);
+                  const lng = parseFloat(r.lon);
+                  const favKey = `${lat}|${lng}`;
+                  const isFav = favoriteIdsRef.current.has(favKey);
+                  return (
+                    <div
+                      key={r.place_id}
+                      className="am-card"
+                      onClick={() => flyToResult(r)}
+                    >
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>
+                            {r.display_name.split(",")[0]}
+                          </div>
+                          <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
+                            {r.display_name}
+                          </div>
+                        </div>
+                        <button
+                          className={`am-btn am-btn-icon ${isFav ? "am-btn-active" : ""}`}
+                          style={{ flexShrink: 0 }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleFavorite(r.display_name.split(",")[0], lat, lng);
+                          }}
+                          title={isFav ? "Remove from favorites" : "Add to favorites"}
+                        >
+                          {isFav ? "★" : "☆"}
+                        </button>
+                      </div>
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
-                      {r.display_name}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -865,6 +1156,259 @@ export default function AtlasMindApp() {
           </div>
         )}
 
+        {tab === "community" && (
+          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>📢 Community reports</div>
+              <button
+                className="am-btn am-btn-icon"
+                onClick={loadReports}
+                title="Refresh"
+              >
+                ↻
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
+              Tap the map to add a report (road damage, flood, construction, parking, safety, facilities).
+            </div>
+            {reportsLoading && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
+                <span className="am-spinner" /> Loading reports…
+              </div>
+            )}
+            {!reportsLoading && reports.length === 0 && (
+              <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
+                No reports yet — tap the map to add the first one.
+              </div>
+            )}
+            {reports.length > 0 && (
+              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }}>
+                {reports.map((r) => {
+                  const meta = reportMeta(r.category);
+                  return (
+                    <div key={r.id} className="am-card" onClick={() => flyToCoords(r.lat, r.lng)}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>
+                            {meta.icon} {meta.label}
+                          </div>
+                          {r.description && (
+                            <div style={{ fontSize: 11, color: "var(--am-muted)", marginTop: 2 }}>
+                              {r.description}
+                            </div>
+                          )}
+                          <div style={{ fontSize: 10, color: "var(--am-muted)", marginTop: 2 }}>
+                            {new Date(r.created_at).toLocaleString()} · {r.lat.toFixed(4)}, {r.lng.toFixed(4)}
+                          </div>
+                        </div>
+                        <button
+                          className="am-btn am-btn-icon"
+                          onClick={(e) => { e.stopPropagation(); handleDeleteReport(r.id); }}
+                          title="Delete report"
+                        >
+                          🗑
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "places" && (
+          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>✨ Community places</div>
+              <button className="am-btn am-btn-icon" onClick={loadPlaces} title="Refresh">↻</button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
+              Add missing places via the map. Places become Verified after 3 community confirmations.
+            </div>
+            {placesLoading && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
+                <span className="am-spinner" /> Loading places…
+              </div>
+            )}
+            {!placesLoading && places.length === 0 && (
+              <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
+                No places added yet — tap the map and choose "Add place".
+              </div>
+            )}
+            {places.length > 0 && (
+              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }}>
+                {places.map((p) => {
+                  const verified = p.status === "verified";
+                  const alreadyConfirmed = confirmedPlacesRef.current.has(p.id);
+                  return (
+                    <div key={p.id} className="am-card" onClick={() => flyToCoords(p.lat, p.lng)}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>
+                            {p.name}
+                          </div>
+                          <div style={{ fontSize: 11, color: "var(--am-muted)", marginTop: 2, textTransform: "capitalize" }}>
+                            {p.category} · {p.lat.toFixed(4)}, {p.lng.toFixed(4)}
+                          </div>
+                          <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center" }}>
+                            <span
+                              className="am-chip"
+                              style={{
+                                color: verified ? "#22c55e" : "#f5b301",
+                                borderColor: verified ? "rgba(34,197,94,0.4)" : "rgba(245,179,1,0.4)",
+                              }}
+                            >
+                              {verified ? "✓ Verified" : "⏳ Pending"} · {p.confirmation_count}/3
+                            </span>
+                          </div>
+                        </div>
+                        {!verified && (
+                          <button
+                            className={`am-btn ${alreadyConfirmed ? "" : "am-btn-primary"}`}
+                            style={{ flexShrink: 0 }}
+                            disabled={alreadyConfirmed}
+                            onClick={(e) => { e.stopPropagation(); handleConfirmPlace(p.id); }}
+                          >
+                            {alreadyConfirmed ? "✓ Confirmed" : "Confirm"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "favorites" && (
+          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>★ Favorites</div>
+            <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
+              Tap ☆ on any search result to save it here.
+            </div>
+            {favoritesLoading && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
+                <span className="am-spinner" /> Loading favorites…
+              </div>
+            )}
+            {!favoritesLoading && favorites.length === 0 && (
+              <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
+                No favorites yet — search a place and tap ☆ to save it.
+              </div>
+            )}
+            {favorites.length > 0 && (
+              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }}>
+                {favorites.map((f) => (
+                  <div key={f.id} className="am-card" onClick={() => flyToCoords(f.lat, f.lng)}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>★ {f.name}</div>
+                        <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
+                          {f.lat.toFixed(4)}, {f.lng.toFixed(4)}
+                        </div>
+                      </div>
+                      <button
+                        className="am-btn am-btn-icon"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeFavorite(f.id).then(() => loadFavorites());
+                        }}
+                        title="Remove favorite"
+                      >
+                        🗑
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "history" && (
+          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>🕘 Route history</div>
+              {routeHistory.length > 0 && (
+                <button
+                  className="am-btn am-btn-icon"
+                  onClick={() => { clearRouteHistory().then(() => loadRouteHistory()); }}
+                  title="Clear history"
+                >
+                  🗑
+                </button>
+              )}
+            </div>
+            {historyLoading && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
+                <span className="am-spinner" /> Loading history…
+              </div>
+            )}
+            {!historyLoading && routeHistory.length === 0 && (
+              <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
+                No routes yet — plan a route in the Route tab to log it here.
+              </div>
+            )}
+            {routeHistory.length > 0 && (
+              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }}>
+                {routeHistory.map((row) => (
+                  <div key={row.id} className="am-card">
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>
+                          {row.from_label} → {row.to_label}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--am-muted)", marginTop: 2 }}>
+                          {fmtDistance(row.distance_m)} · {fmtDuration(row.duration_s)} · {new Date(row.created_at).toLocaleString()}
+                        </div>
+                      </div>
+                      <button
+                        className="am-btn am-btn-primary"
+                        style={{ flexShrink: 0 }}
+                        onClick={() => rerunHistoryRoute(row)}
+                      >
+                        ↻ Re-run
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "measure" && (
+          <div className="am-anim-fade" style={{ display: "grid", gap: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>📏 Distance measurement</div>
+            <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
+              Toggle, then click points on the map to measure the total path distance.
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                className={`am-btn ${measureState?.active ? "am-btn-active" : ""}`}
+                onClick={toggleMeasure}
+              >
+                {measureState?.active ? "⏸ Stop measuring" : "📏 Start measuring"}
+              </button>
+              {measureState && measureState.points.length > 0 && (
+                <button className="am-btn" onClick={resetMeasure}>Clear</button>
+              )}
+            </div>
+            {measureState && measureState.points.length > 0 && (
+              <div className="am-card" style={{ cursor: "default" }}>
+                <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
+                  {measureState.points.length} point{measureState.points.length > 1 ? "s" : ""}
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>
+                  {fmtMeasure(measureState.total)}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {tab === "tips" && (
           <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
             <div className="am-card" style={{ cursor: "default" }}>
@@ -888,9 +1432,7 @@ export default function AtlasMindApp() {
           </div>
         )}
 
-        {tab === "traffic" && (
-          <TrafficDashboard map={mapRef.current} active={tab === "traffic"} />
-        )}
+        {tab === "traffic" && <TrafficDashboard active={tab === "traffic"} />}
       </div>
 
       {/* Onboarding */}
@@ -999,6 +1541,35 @@ export default function AtlasMindApp() {
           </div>
         </div>
       )}
+
+      {/* Map action modal: report / add place */}
+      <MapActionModal
+        action={mapAction}
+        onClose={() => setMapAction(null)}
+        onDone={() => {
+          loadReports();
+          loadPlaces();
+        }}
+      />
+
+      {/* SOS modal */}
+      <SosModal
+        open={sosOpen}
+        onClose={() => setSosOpen(false)}
+        mapCenter={mapRef.current ? mapRef.current.getCenter() : null}
+        onLocate={(cb) => {
+          if (!navigator.geolocation) {
+            cb(mapRef.current ? mapRef.current.getCenter() : { lat: 25.383, lng: 68.356 });
+            return;
+          }
+          navigator.geolocation.getCurrentPosition(
+            (pos) => cb({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+            () => cb(mapRef.current ? mapRef.current.getCenter() : { lat: 25.383, lng: 68.356 }),
+            { enableHighAccuracy: true, timeout: 8000 },
+          );
+        }}
+        flyTo={flyToCoords}
+      />
     </div>
   );
 }
