@@ -414,7 +414,30 @@ export default function AtlasMindApp() {
    *  - surface a clear "search failed, try again" message on failure
    */
   const doSearch = useCallback(async (rawQ: string) => {
-    const q = rawQ.trim();
+    const normalize = (s: string) =>
+      s.trim().replace(/\s+/g, " ").replace(/[,\s]+$/, "");
+    const expandLocal = (q: string): string[] => {
+      const n = normalize(q);
+      if (!n) return [];
+      const lower = n.toLowerCase();
+      const LOCAL_CTX = "Latifabad, Hyderabad, Sindh, Pakistan";
+      // "Unit N" → expand into the local Latifabad context so OSM can resolve it
+      const unitMatch = lower.match(/^unit\s*([0-9a-z]+)$/);
+      if (unitMatch) {
+        return [
+          `Latifabad Unit ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
+          `Unit ${unitMatch[1]}, Latifabad, Hyderabad, Sindh, Pakistan`,
+          `Unit ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
+        ];
+      }
+      // Short local queries: try raw first, then a context-expanded variant
+      const hasContext = /hyderabad|sindh|pakistan|latifabad/.test(lower);
+      if (n.length <= 16 && !hasContext) {
+        return [n, `${n}, ${LOCAL_CTX}`];
+      }
+      return [n];
+    };
+    const q = normalize(rawQ);
     if (!q) {
       setSearchResults([]);
       setSearchError(null);
@@ -428,16 +451,41 @@ export default function AtlasMindApp() {
     setSearchLoading(true);
     setSearchError(null);
     try {
-      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=8&q=${encodeURIComponent(q)}`;
-      const r = await fetch(url, {
-        headers: { Accept: "application/json" },
-        signal: ac.signal,
-      });
-      if (!r.ok) throw new Error(`Search failed (${r.status})`);
-      const j = (await r.json()) as SearchResult[];
+      const variants = expandLocal(q);
+      let j: SearchResult[] = [];
+      for (const variant of variants) {
+        if (ac.signal.aborted) return;
+        const url = `https://nominatim.openstreetmap.org/search?format=json&limit=8&addressdetails=1&q=${encodeURIComponent(variant)}`;
+        const r = await fetch(url, {
+          headers: { Accept: "application/json" },
+          signal: ac.signal,
+        });
+        if (!r.ok) throw new Error(`Search failed (${r.status})`);
+        j = (await r.json()) as SearchResult[];
+        if (j.length > 0) break;
+      }
       if (ac.signal.aborted) return;
-      setSearchResults(j);
-      if (j.length === 0) setSearchError("No results found — try a different query");
+      // Deduplicate and rank by token overlap for partial / fuzzy matching
+      const seen = new Set<number>();
+      const qTokens = q.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
+      const ranked = j
+        .filter((r) => {
+          if (seen.has(r.place_id)) return false;
+          seen.add(r.place_id);
+          return true;
+        })
+        .map((r) => {
+          const name = (r.display_name || "").toLowerCase();
+          let score = 0;
+          qTokens.forEach((t) => {
+            if (name.includes(t)) score++;
+          });
+          return { r, score };
+        })
+        .sort((a, b) => b.score - a.score);
+      const final = ranked.map((x) => x.r);
+      setSearchResults(final);
+      if (final.length === 0) setSearchError("No results found — try a different query");
     } catch (e: any) {
       if (e?.name === "AbortError") return;
       setSearchResults([]);
