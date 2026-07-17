@@ -422,15 +422,17 @@ export default function AtlasMindApp() {
       const lower = n.toLowerCase();
       const LOCAL_CTX = "Latifabad, Hyderabad, Sindh, Pakistan";
       // "Unit N" → expand into the local Latifabad context so OSM can resolve it
-      const unitNumMatch = lower.match(/unit\s*(?:no\.?\s*)?#?\s*([0-9]+)/);
-      if (unitNumMatch) {
-        const num = unitNumMatch[1];
-        return [
-          `Latifabad Unit No ${num}, Hyderabad, Sindh, Pakistan`,
-          `Latifabad Unit ${num}, Hyderabad, Sindh, Pakistan`,
-          `Latifabad ${num}, Hyderabad, Sindh, Pakistan`,
-          `Unit ${num}, Latifabad, Hyderabad, Sindh, Pakistan`,
-        ];
+    for (const variant of variants) {
+        if (ac.signal.aborted) return;
+        const url = `https://nominatim.openstreetmap.org/search?format=json&limit=8&addressdetails=1&q=${encodeURIComponent(variant)}`;
+        const r = await fetch(url, {
+          headers: { Accept: "application/json" },
+          signal: ac.signal,
+        });
+        if (!r.ok) throw new Error(`Search failed (${r.status})`);
+        const partial = (await r.json()) as SearchResult[];
+        if (partial.length > 0) { j = partial; break; }
+        await new Promise((res) => setTimeout(res, 300));
       }
       // Short local queries: try raw first, then a context-expanded variant
       const hasContext = /hyderabad|sindh|pakistan|latifabad/.test(lower);
