@@ -425,7 +425,9 @@ export default function AtlasMindApp() {
       const unitMatch = lower.match(/^unit\s*([0-9a-z]+)$/);
       if (unitMatch) {
         return [
+          `Latifabad ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
           `Latifabad Unit ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
+          `Latifabad Unit No ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
           `Unit ${unitMatch[1]}, Latifabad, Hyderabad, Sindh, Pakistan`,
           `Unit ${unitMatch[1]}, Hyderabad, Sindh, Pakistan`,
         ];
