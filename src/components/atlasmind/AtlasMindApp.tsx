@@ -796,33 +796,6 @@ export default function AtlasMindApp() {
     [],
   );
 
-  /* ---- SOS ---- */
-  const sosCoords = useMemo(() => {
-    if (!mapRef.current) return null;
-    return mapRef.current.getCenter();
-  }, [toast]);
-  const triggerSOS = useCallback(() => {
-    if (!navigator.geolocation) return showToast("Geolocation not available for SOS");
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude, longitude } = pos.coords;
-        const gm = `https://www.google.com/maps?q=${latitude},${longitude}`;
-        const text = `EMERGENCY — I need help. My location: ${latitude.toFixed(5)}, ${longitude.toFixed(5)} — ${gm}`;
-        if (navigator.share) {
-          navigator.share({ title: "SOS — AtlasMind", text }).catch(() => {
-            navigator.clipboard.writeText(text);
-            showToast("SOS location copied to clipboard");
-          });
-        } else {
-          navigator.clipboard.writeText(text);
-          showToast("SOS location copied — share with emergency contacts");
-        }
-      },
-      () => showToast("Could not obtain location for SOS"),
-      { enableHighAccuracy: true, timeout: 8000 },
-    );
-  }, [showToast]);
-
   /* ---- Onboarding ---- */
   const finishOnboarding = useCallback(() => {
     window.localStorage.setItem("atlasmind:onboarded", "1");
