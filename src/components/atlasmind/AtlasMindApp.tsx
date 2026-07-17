@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet.markercluster";
 import { AtlasMindLogo } from "./Logo";
+import { TrafficDashboard } from "./TrafficDashboard";
 
 type LatLng = { lat: number; lng: number };
 type SearchResult = {
@@ -888,22 +889,7 @@ export default function AtlasMindApp() {
         )}
 
         {tab === "traffic" && (
-          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
-            <div className="am-card" style={{ cursor: "default" }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>🚦 Traffic estimate</div>
-              <div style={{ fontSize: 12, color: "var(--am-muted)", marginTop: 4 }}>
-                {routeInfo
-                  ? `Estimated ${fmtDuration(routeInfo.duration)} for ${fmtDistance(routeInfo.distance)} based on OSRM driving-time model. Add ~15% during 08:00–10:00 and 17:00–19:00.`
-                  : "Build a route to see travel-time estimates."}
-              </div>
-            </div>
-            <div className="am-card" style={{ cursor: "default" }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>🌦 Weather impact</div>
-              <div style={{ fontSize: 12, color: "var(--am-muted)", marginTop: 4 }}>
-                {advisory?.headline ?? "Move the map to sample conditions."} · {advisory?.summary ?? "—"}
-              </div>
-            </div>
-          </div>
+          <TrafficDashboard map={mapRef.current} active={tab === "traffic"} />
         )}
       </div>
 
