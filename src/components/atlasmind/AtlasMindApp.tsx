@@ -21,6 +21,7 @@ import {
   addFavorite,
   fetchFavorites,
   removeFavorite,
+  isFavorite,
   logRoute,
   fetchRouteHistory,
   clearRouteHistory,
@@ -69,8 +70,7 @@ type Tab =
   | "places"
   | "favorites"
   | "history"
-  | "measure"
-  | "roadmap";
+  | "measure";
 
 type ReportMeta = { key: ReportCategory; label: string; icon: string; color: string };
 const REPORT_META: ReportMeta[] = [
@@ -96,8 +96,8 @@ function fmtDuration(s: number) {
   return `${m} min`;
 }
 
-function pinIcon(color = "#6c5ce7", animate = false) {
-  const html = `<div class="${animate ? "am-pin-drop" : ""}" style="width:26px;height:26px;transform:translate(-50%,-100%);">
+function pinIcon(color = "#6c5ce7") {
+  const html = `<div style="width:26px;height:26px;transform:translate(-50%,-100%);">
     <svg viewBox="0 0 24 32" width="26" height="32" xmlns="http://www.w3.org/2000/svg">
       <path d="M12 0C5.4 0 0 5.4 0 12c0 8.8 12 20 12 20s12-11.2 12-20C24 5.4 18.6 0 12 0z" fill="${color}"/>
       <circle cx="12" cy="12" r="4.5" fill="#fff"/>
@@ -134,6 +134,7 @@ function themeTiles(theme: "dark" | "light") {
   };
 }
 
+/* ---------- Weather advisory ---------- */
 function buildAdvisory(data: {
   temperature: number;
   precipitation: number;
@@ -161,18 +162,6 @@ function buildAdvisory(data: {
   return { headline: parts[0], summary };
 }
 
-/* ---- Waypoint type for multi-stop routing ---- */
-type Waypoint = {
-  id: string;
-  label: string;
-  ll: LatLng | null;
-  query: string;
-};
-
-function newWaypoint(): Waypoint {
-  return { id: crypto.randomUUID(), label: "", ll: null, query: "" };
-}
-
 /* ============================================================ */
 
 export default function AtlasMindApp() {
@@ -181,7 +170,7 @@ export default function AtlasMindApp() {
   const tileRef = useRef<L.TileLayer | null>(null);
   const searchMarkerRef = useRef<L.Marker | null>(null);
   const locMarkerRef = useRef<L.Marker | null>(null);
-  const routeLayerRef = useRef<L.LayerGroup | null>(null);
+  const routeLayerRef = useRef<L.Polyline | null>(null);
   const routeEndpointsRef = useRef<L.LayerGroup | null>(null);
   const clusterRef = useRef<any>(null);
   const clickMarkerRef = useRef<L.Marker | null>(null);
@@ -194,7 +183,6 @@ export default function AtlasMindApp() {
     return window.localStorage.getItem("atlasmind:onboarded") ? -1 : 0;
   });
   const [toast, setToast] = useState<string | null>(null);
-  const [isOffline, setIsOffline] = useState(!navigator.onLine);
 
   // Search
   const [searchQ, setSearchQ] = useState("");
@@ -205,8 +193,11 @@ export default function AtlasMindApp() {
   const searchLastQRef = useRef<string>("");
   const searchDebounceRef = useRef<number | null>(null);
 
-  // Multi-stop routing
-  const [waypoints, setWaypoints] = useState<Waypoint[]>([newWaypoint(), newWaypoint()]);
+  // Routing
+  const [routeFrom, setRouteFrom] = useState<{ label: string; ll: LatLng } | null>(null);
+  const [routeTo, setRouteTo] = useState<{ label: string; ll: LatLng } | null>(null);
+  const [routeFromQ, setRouteFromQ] = useState("");
+  const [routeToQ, setRouteToQ] = useState("");
   const [routeInfo, setRouteInfo] = useState<{ distance: number; duration: number } | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
@@ -221,16 +212,21 @@ export default function AtlasMindApp() {
   const [advisory, setAdvisory] = useState<{ headline: string; summary: string } | null>(null);
   const [advisoryLoading, setAdvisoryLoading] = useState(false);
 
-  // Community reports + places
+  // Community reports + places (shared, DB-backed)
   const [reports, setReports] = useState<CommunityReport[]>([]);
   const [places, setPlaces] = useState<Place[]>([]);
   const [reportsLoading, setReportsLoading] = useState(false);
   const [placesLoading, setPlacesLoading] = useState(false);
-  const communityClusterRef = useRef<any>(null);
+  const reportsLayerRef = useRef<L.LayerGroup | null>(null);
   const placesLayerRef = useRef<L.LayerGroup | null>(null);
+  const communityClusterRef = useRef<any>(null);
+  const placeClusterRef = useRef<any>(null);
   const confirmedPlacesRef = useRef<Set<string>>(new Set());
 
+  // Map action modal (report / add place) opened by tapping the map
   const [mapAction, setMapAction] = useState<MapAction>(null);
+
+  // SOS modal
   const [sosOpen, setSosOpen] = useState(false);
 
   // Favorites
@@ -242,29 +238,14 @@ export default function AtlasMindApp() {
   const [routeHistory, setRouteHistory] = useState<RouteHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
 
-  // Measure
+  // Distance measurement
   const [measureState, setMeasureState] = useState<MeasureState | null>(null);
   const measureToolRef = useRef<ReturnType<typeof createMeasureTool> | null>(null);
-
-  // Location share
-  const [shareLoading, setShareLoading] = useState(false);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     window.clearTimeout((showToast as any)._t);
-    (showToast as any)._t = window.setTimeout(() => setToast(null), 2800);
-  }, []);
-
-  /* ---- Offline detection ---- */
-  useEffect(() => {
-    const setOnline = () => setIsOffline(false);
-    const setOffline = () => setIsOffline(true);
-    window.addEventListener("online", setOnline);
-    window.addEventListener("offline", setOffline);
-    return () => {
-      window.removeEventListener("online", setOnline);
-      window.removeEventListener("offline", setOffline);
-    };
+    (showToast as any)._t = window.setTimeout(() => setToast(null), 2600);
   }, []);
 
   /* ---- Init map ---- */
@@ -286,7 +267,6 @@ export default function AtlasMindApp() {
     }).addTo(map);
 
     routeEndpointsRef.current = L.layerGroup().addTo(map);
-    routeLayerRef.current = L.layerGroup().addTo(map);
 
     clusterRef.current = (L as unknown as {
       markerClusterGroup: (opts: unknown) => L.LayerGroup;
@@ -297,6 +277,7 @@ export default function AtlasMindApp() {
     });
     map.addLayer(clusterRef.current);
 
+    // Separate cluster layers for community reports and user-added places
     communityClusterRef.current = (L as unknown as {
       markerClusterGroup: (opts: unknown) => L.LayerGroup;
     }).markerClusterGroup({
@@ -308,10 +289,11 @@ export default function AtlasMindApp() {
     placesLayerRef.current = L.layerGroup().addTo(map);
 
     map.on("click", (e: L.LeafletMouseEvent) => {
+      // Don't open the action modal while the measure tool is capturing clicks
       if (measureToolRef.current?.isActive()) return;
       const { lat, lng } = e.latlng;
       if (clickMarkerRef.current) clickMarkerRef.current.remove();
-      clickMarkerRef.current = L.marker([lat, lng], { icon: pinIcon("#00d4ff", true) })
+      clickMarkerRef.current = L.marker([lat, lng], { icon: pinIcon("#00d4ff") })
         .addTo(map)
         .bindTooltip(`${lat.toFixed(5)}, ${lng.toFixed(5)}`, {
           permanent: false,
@@ -322,15 +304,20 @@ export default function AtlasMindApp() {
       setMapAction({ type: "report", lat, lng });
     });
 
+    // initial weather at world center — will refresh on move
     setTimeout(() => refreshWeather(), 300);
     map.on("moveend", () => {
+      // debounce via ref
       window.clearTimeout((refreshWeather as any)._t);
       (refreshWeather as any)._t = window.setTimeout(refreshWeather, 900);
     });
 
-    delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })._getIconUrl;
+    // Fix default icon path for any raw markers
+    delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })
+      ._getIconUrl;
     L.Icon.Default.mergeOptions({
-      iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+      iconRetinaUrl:
+        "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
       iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
       shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
     });
@@ -370,7 +357,9 @@ export default function AtlasMindApp() {
       const hourly = j.hourly?.precipitation ?? [];
       const nowIdx = j.hourly?.time?.findIndex((t: string) => t.startsWith(cw.time.slice(0, 13))) ?? -1;
       const next: number =
-        nowIdx >= 0 ? Math.max(...(hourly.slice(nowIdx, nowIdx + 3) as number[])) : 0;
+        nowIdx >= 0
+          ? Math.max(...(hourly.slice(nowIdx, nowIdx + 3) as number[]))
+          : 0;
       setAdvisory(
         buildAdvisory({
           temperature: cw.temperature,
@@ -417,30 +406,15 @@ export default function AtlasMindApp() {
     );
   }, [showToast]);
 
-  /* ---- Search ---- */
+  /* ---- Search ----
+   * Nominatim rate-limits rapid requests, so:
+   *  - debounce keystrokes ~500ms
+   *  - skip if the same query is already in flight
+   *  - abort any previous inflight request when a newer one starts
+   *  - surface a clear "search failed, try again" message on failure
+   */
   const doSearch = useCallback(async (rawQ: string) => {
-    const normalize = (s: string) => s.trim().replace(/\s+/g, " ").replace(/[,\s]+$/, "");
-    const expandLocal = (q: string): string[] => {
-      const n = normalize(q);
-      if (!n) return [];
-      const lower = n.toLowerCase();
-      const LOCAL_CTX = "Latifabad, Hyderabad, Sindh, Pakistan";
-      const unitNumMatch = lower.match(/unit\s*(?:no\.?\s*)?#?\s*([0-9]+)/);
-      if (unitNumMatch) {
-        const num = unitNumMatch[1];
-        return [
-          `Latifabad Unit No ${num}, Hyderabad, Sindh, Pakistan`,
-          `Latifabad Unit ${num}, Hyderabad, Sindh, Pakistan`,
-          `Latifabad ${num}, Hyderabad, Sindh, Pakistan`,
-        ];
-      }
-      const hasContext = /hyderabad|sindh|pakistan|latifabad/.test(lower);
-      if (n.length <= 16 && !hasContext) {
-        return [n, `${n}, ${LOCAL_CTX}`];
-      }
-      return [n];
-    };
-    const q = normalize(rawQ);
+    const q = rawQ.trim();
     if (!q) {
       setSearchResults([]);
       setSearchError(null);
@@ -454,39 +428,16 @@ export default function AtlasMindApp() {
     setSearchLoading(true);
     setSearchError(null);
     try {
-      const variants = expandLocal(q);
-      let j: SearchResult[] = [];
-      for (const variant of variants) {
-        if (ac.signal.aborted) return;
-        const url = `https://nominatim.openstreetmap.org/search?format=json&limit=8&addressdetails=1&q=${encodeURIComponent(variant)}`;
-        const r = await fetch(url, {
-          headers: { Accept: "application/json" },
-          signal: ac.signal,
-        });
-        if (!r.ok) throw new Error(`Search failed (${r.status})`);
-        const partial = (await r.json()) as SearchResult[];
-        j = j.concat(partial);
-        if (j.length >= 5) break;
-      }
+      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=8&q=${encodeURIComponent(q)}`;
+      const r = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: ac.signal,
+      });
+      if (!r.ok) throw new Error(`Search failed (${r.status})`);
+      const j = (await r.json()) as SearchResult[];
       if (ac.signal.aborted) return;
-      const seen = new Set<number>();
-      const qTokens = q.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
-      const ranked = j
-        .filter((r) => {
-          if (seen.has(r.place_id)) return false;
-          seen.add(r.place_id);
-          return true;
-        })
-        .map((r) => {
-          const name = (r.display_name || "").toLowerCase();
-          let score = 0;
-          qTokens.forEach((t) => { if (name.includes(t)) score++; });
-          return { r, score };
-        })
-        .sort((a, b) => b.score - a.score);
-      const final = ranked.map((x) => x.r);
-      setSearchResults(final);
-      if (final.length === 0) setSearchError("No results found — try a different query");
+      setSearchResults(j);
+      if (j.length === 0) setSearchError("No results found — try a different query");
     } catch (e: any) {
       if (e?.name === "AbortError") return;
       setSearchResults([]);
@@ -499,6 +450,7 @@ export default function AtlasMindApp() {
     }
   }, []);
 
+  // Debounced live search as the user types
   useEffect(() => {
     if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
     const q = searchQ.trim();
@@ -512,7 +464,9 @@ export default function AtlasMindApp() {
       return;
     }
     if (q.length < 2) return;
-    searchDebounceRef.current = window.setTimeout(() => { doSearch(q); }, 500);
+    searchDebounceRef.current = window.setTimeout(() => {
+      doSearch(q);
+    }, 500);
     return () => {
       if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
     };
@@ -525,14 +479,14 @@ export default function AtlasMindApp() {
     mapRef.current.flyTo([lat, lng], 15, { duration: 1.3 });
     if (dropMarker) {
       if (searchMarkerRef.current) searchMarkerRef.current.remove();
-      searchMarkerRef.current = L.marker([lat, lng], { icon: pinIcon("#6c5ce7", true) })
+      searchMarkerRef.current = L.marker([lat, lng], { icon: pinIcon("#6c5ce7") })
         .addTo(mapRef.current)
         .bindPopup(`<strong>${r.display_name}</strong>`)
         .openPopup();
     }
   }, []);
 
-  /* ---- Multi-stop routing ---- */
+  /* ---- Routing ---- */
   const geocodeOne = useCallback(async (q: string): Promise<LatLng | null> => {
     const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
     const r = await fetch(url, { headers: { Accept: "application/json" } });
@@ -542,110 +496,70 @@ export default function AtlasMindApp() {
     return { lat: parseFloat(j[0].lat), lng: parseFloat(j[0].lon) };
   }, []);
 
-  const updateWaypoint = useCallback((id: string, patch: Partial<Waypoint>) => {
-    setWaypoints((prev) => prev.map((w) => (w.id === id ? { ...w, ...patch } : w)));
-  }, []);
-
-  const addWaypoint = useCallback(() => {
-    setWaypoints((prev) => {
-      if (prev.length >= 6) return prev;
-      const last = newWaypoint();
-      return [...prev, last];
-    });
-  }, []);
-
-  const removeWaypoint = useCallback((id: string) => {
-    setWaypoints((prev) => {
-      if (prev.length <= 2) return prev;
-      return prev.filter((w) => w.id !== id);
-    });
-  }, []);
-
-  const moveWaypoint = useCallback((id: string, dir: -1 | 1) => {
-    setWaypoints((prev) => {
-      const idx = prev.findIndex((w) => w.id === id);
-      if (idx < 0) return prev;
-      const next = idx + dir;
-      if (next < 0 || next >= prev.length) return prev;
-      const arr = [...prev];
-      [arr[idx], arr[next]] = [arr[next], arr[idx]];
-      return arr;
-    });
-  }, []);
-
   const buildRoute = useCallback(async () => {
     if (!mapRef.current) return;
     setRouteError(null);
     setRouteLoading(true);
     setRouteInfo(null);
     try {
-      // Resolve any ungeocoded waypoints
-      const resolved: Waypoint[] = [];
-      for (const wp of waypoints) {
-        if (wp.ll) {
-          resolved.push(wp);
-          continue;
-        }
-        if (!wp.query.trim()) throw new Error("Fill in all stops before calculating");
-        const ll = await geocodeOne(wp.query.trim());
-        if (!ll) throw new Error(`Could not find: "${wp.query}"`);
-        resolved.push({ ...wp, ll, label: wp.query });
+      let from = routeFrom;
+      let to = routeTo;
+      if (!from && routeFromQ.trim()) {
+        const ll = await geocodeOne(routeFromQ);
+        if (!ll) throw new Error("Origin not found");
+        from = { label: routeFromQ, ll };
+        setRouteFrom(from);
       }
-      setWaypoints(resolved);
+      if (!to && routeToQ.trim()) {
+        const ll = await geocodeOne(routeToQ);
+        if (!ll) throw new Error("Destination not found");
+        to = { label: routeToQ, ll };
+        setRouteTo(to);
+      }
+      if (!from || !to) throw new Error("Set both origin and destination");
 
-      const validWps = resolved.filter((w) => w.ll !== null) as (Waypoint & { ll: LatLng })[];
-      if (validWps.length < 2) throw new Error("Add at least 2 stops");
-
-      const coords = validWps.map((w) => `${w.ll.lng},${w.ll.lat}`).join(";");
-      const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+      const url = `https://router.project-osrm.org/route/v1/driving/${from.ll.lng},${from.ll.lat};${to.ll.lng},${to.ll.lat}?overview=full&geometries=geojson`;
       const r = await fetch(url);
-      if (!r.ok) throw new Error("Routing service unavailable");
+      if (!r.ok) throw new Error("Routing failed");
       const j = await r.json();
       if (!j.routes?.[0]) throw new Error("No route found");
       const route = j.routes[0];
-      const routeCoords: [number, number][] = route.geometry.coordinates.map(
+      const coords: [number, number][] = route.geometry.coordinates.map(
         (c: [number, number]) => [c[1], c[0]],
       );
-
-      // Clear previous route layers
-      routeLayerRef.current?.clearLayers();
-      routeEndpointsRef.current?.clearLayers();
-
-      // Draw route
-      L.polyline(routeCoords, {
-        color: "#6c5ce7",
-        weight: 12,
-        opacity: 0.25,
-      }).addTo(routeLayerRef.current!);
-      L.polyline(routeCoords, {
+      if (routeLayerRef.current) routeLayerRef.current.remove();
+      routeLayerRef.current = L.polyline(coords, {
         color: "#00d4ff",
         weight: 6,
         opacity: 0.9,
         lineCap: "round",
         lineJoin: "round",
-      }).addTo(routeLayerRef.current!);
+      }).addTo(mapRef.current);
+      // outer glow
+      L.polyline(coords, {
+        color: "#6c5ce7",
+        weight: 12,
+        opacity: 0.25,
+      }).addTo(routeLayerRef.current as any);
 
-      // Waypoint markers
-      const labels = ["A", "B", "C", "D", "E", "F"];
-      validWps.forEach((wp, i) => {
-        const isLast = i === validWps.length - 1;
-        const color = i === 0 ? "#6c5ce7" : isLast ? "#00d4ff" : "#f5b301";
-        L.marker([wp.ll.lat, wp.ll.lng], { icon: pinIcon(color, true) })
-          .bindTooltip(labels[i] ? `${labels[i]}: ${wp.label || wp.query}` : wp.label || wp.query)
-          .addTo(routeEndpointsRef.current!);
-      });
+      routeEndpointsRef.current?.clearLayers();
+      L.marker([from.ll.lat, from.ll.lng], { icon: pinIcon("#6c5ce7") })
+        .bindTooltip("Start")
+        .addTo(routeEndpointsRef.current!);
+      L.marker([to.ll.lat, to.ll.lng], { icon: pinIcon("#00d4ff") })
+        .bindTooltip("Destination")
+        .addTo(routeEndpointsRef.current!);
 
-      mapRef.current.fitBounds(L.latLngBounds(routeCoords), { padding: [80, 80] });
+      mapRef.current.fitBounds(L.latLngBounds(coords), { padding: [80, 80] });
       setRouteInfo({ distance: route.distance, duration: route.duration });
-
-      // Log to history (from first to last)
+      // Persist completed route to history
       logRoute({
-        from_label: validWps[0].label || validWps[0].query,
-        to_label: validWps[validWps.length - 1].label || validWps[validWps.length - 1].query,
-        from_lat: validWps[0].ll.lat,
-        from_lng: validWps[0].ll.lng,
-        to_lat: validWps[validWps.length - 1].ll.lat,
-        to_lng: validWps[validWps.length - 1].ll.lng,
+        from_label: from.label,
+        to_label: to.label,
+        from_lat: from.ll.lat,
+        from_lng: from.ll.lng,
+        to_lat: to.ll.lat,
+        to_lng: to.ll.lng,
         distance_m: route.distance,
         duration_s: route.duration,
       }).then(() => loadRouteHistory());
@@ -654,31 +568,32 @@ export default function AtlasMindApp() {
     } finally {
       setRouteLoading(false);
     }
-  }, [waypoints, geocodeOne]);
+  }, [routeFrom, routeTo, routeFromQ, routeToQ, geocodeOne]);
 
-  const useMyLocationAsWaypoint = useCallback(
-    (id: string) => {
-      if (!navigator.geolocation) return showToast("Geolocation not supported");
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          updateWaypoint(id, {
-            ll: { lat: pos.coords.latitude, lng: pos.coords.longitude },
-            query: "My location",
-            label: "My location",
-          });
-          showToast("Stop set to your location");
-        },
-        (err) => showToast(err.message),
-      );
-    },
-    [showToast, updateWaypoint],
-  );
+  const useMyLocationAsOrigin = useCallback(() => {
+    if (!navigator.geolocation) return showToast("Geolocation not supported");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setRouteFrom({
+          label: "My location",
+          ll: { lat: pos.coords.latitude, lng: pos.coords.longitude },
+        });
+        setRouteFromQ("My location");
+        showToast("Origin set to your location");
+      },
+      (err) => showToast(err.message),
+    );
+  }, [showToast]);
 
   const clearRoute = useCallback(() => {
-    routeLayerRef.current?.clearLayers();
+    routeLayerRef.current?.remove();
+    routeLayerRef.current = null;
     routeEndpointsRef.current?.clearLayers();
     setRouteInfo(null);
-    setWaypoints([newWaypoint(), newWaypoint()]);
+    setRouteFrom(null);
+    setRouteTo(null);
+    setRouteFromQ("");
+    setRouteToQ("");
     setRouteError(null);
   }, []);
 
@@ -688,13 +603,13 @@ export default function AtlasMindApp() {
     const data = await fetchCommunityReports();
     setReports(data);
     setReportsLoading(false);
+    // render markers
     if (communityClusterRef.current) {
       communityClusterRef.current.clearLayers();
       data.forEach((r) => {
         const meta = reportMeta(r.category);
-        const m = L.marker([r.lat, r.lng], { icon: pinIcon(meta.color) }).bindPopup(
-          `<strong>${meta.icon} ${meta.label}</strong>${r.description ? `<br/>${r.description}` : ""}<br/><small>${new Date(r.created_at).toLocaleString()}</small>`,
-        );
+        const m = L.marker([r.lat, r.lng], { icon: pinIcon(meta.color) })
+          .bindPopup(`<strong>${meta.icon} ${meta.label}</strong>${r.description ? `<br/>${r.description}` : ""}<br/><small>${new Date(r.created_at).toLocaleString()}</small>`);
         communityClusterRef.current.addLayer(m);
       });
     }
@@ -719,12 +634,12 @@ export default function AtlasMindApp() {
           iconSize: [26, 32],
           iconAnchor: [13, 32],
         });
-        const m = L.marker([p.lat, p.lng], { icon }).bindPopup(
-          `<strong>${p.name}</strong><br/>${p.category} · ${p.status}<br/><small>Confirmations: ${p.confirmation_count}/3</small>`,
-        );
+        const m = L.marker([p.lat, p.lng], { icon })
+          .bindPopup(`<strong>${p.name}</strong><br/>${p.category} · ${p.status}<br/><small>Confirmations: ${p.confirmation_count}/3</small>`);
         placesLayerRef.current!.addLayer(m);
       });
     }
+    // refresh which places this device has already confirmed
     const confirmed = new Set<string>();
     for (const p of data) {
       if (await hasConfirmed(p.id)) confirmed.add(p.id);
@@ -775,6 +690,7 @@ export default function AtlasMindApp() {
     async (name: string, lat: number, lng: number) => {
       const key = `${lat}|${lng}`;
       if (favoriteIdsRef.current.has(key)) {
+        // find and remove
         const fav = favorites.find((f) => `${f.lat}|${f.lng}` === key);
         if (fav) {
           await removeFavorite(fav.id);
@@ -800,10 +716,10 @@ export default function AtlasMindApp() {
 
   const rerunHistoryRoute = useCallback(
     (row: RouteHistoryRow) => {
-      setWaypoints([
-        { id: crypto.randomUUID(), label: row.from_label, ll: { lat: row.from_lat, lng: row.from_lng }, query: row.from_label },
-        { id: crypto.randomUUID(), label: row.to_label, ll: { lat: row.to_lat, lng: row.to_lng }, query: row.to_label },
-      ]);
+      setRouteFrom({ label: row.from_label, ll: { lat: row.from_lat, lng: row.from_lng } });
+      setRouteFromQ(row.from_label);
+      setRouteTo({ label: row.to_label, ll: { lat: row.to_lat, lng: row.to_lng } });
+      setRouteToQ(row.to_label);
       setTab("route");
       setTimeout(() => buildRoute(), 100);
     },
@@ -818,7 +734,7 @@ export default function AtlasMindApp() {
     loadRouteHistory();
   }, [loadReports, loadPlaces, loadFavorites, loadRouteHistory]);
 
-  /* ---- Distance measurement ---- */
+  /* ---- Distance measurement tool lifecycle ---- */
   const toggleMeasure = useCallback(() => {
     if (!mapRef.current) return;
     if (!measureToolRef.current) {
@@ -827,7 +743,9 @@ export default function AtlasMindApp() {
     measureToolRef.current.toggle();
   }, []);
 
-  const resetMeasure = useCallback(() => { measureToolRef.current?.reset(); }, []);
+  const resetMeasure = useCallback(() => {
+    measureToolRef.current?.reset();
+  }, []);
 
   const flyToCoords = useCallback((lat: number, lng: number) => {
     mapRef.current?.flyTo([lat, lng], 15, { duration: 1.3 });
@@ -843,10 +761,17 @@ export default function AtlasMindApp() {
       setNearbyResults([]);
       clusterRef.current?.clearLayers();
       try {
+        // Build a viewbox around the current map center (~15 km box) so
+        // Nominatim always returns results near what the user is looking at,
+        // even if they've zoomed out.
         const c = mapRef.current.getCenter();
-        const dLat = 0.135;
+        const dLat = 0.135; // ~15 km
         const dLng = 0.135 / Math.max(0.2, Math.cos((c.lat * Math.PI) / 180));
-        const vb = `${c.lng - dLng},${c.lat + dLat},${c.lng + dLng},${c.lat - dLat}`;
+        const west = c.lng - dLng;
+        const east = c.lng + dLng;
+        const north = c.lat + dLat;
+        const south = c.lat - dLat;
+        const vb = `${west},${north},${east},${south}`;
         const url = `https://nominatim.openstreetmap.org/search?format=json&limit=40&q=${encodeURIComponent(cat.query)}&viewbox=${vb}&bounded=1`;
         const r = await fetch(url, { headers: { Accept: "application/json" } });
         if (!r.ok) throw new Error("Nearby search failed");
@@ -871,82 +796,17 @@ export default function AtlasMindApp() {
     [],
   );
 
-  /* ---- Location sharing ---- */
-  const shareLocation = useCallback(async () => {
-    setShareLoading(true);
-    try {
-      const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
-        if (!navigator.geolocation) return reject(new Error("Geolocation not supported"));
-        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 });
-      });
-      const { latitude: lat, longitude: lng } = pos.coords;
-      const link = `https://maps.google.com/?q=${lat.toFixed(6)},${lng.toFixed(6)}`;
-      const text = `My current location: ${link}\n(${lat.toFixed(5)}, ${lng.toFixed(5)})`;
-
-      if (navigator.share) {
-        await navigator.share({ title: "My Location", text, url: link });
-      } else {
-        await navigator.clipboard.writeText(text);
-        showToast("Location link copied to clipboard!");
-      }
-    } catch (e: any) {
-      if (e.name === "AbortError" || e.name === "NotAllowedError") {
-        showToast("Location permission denied");
-      } else {
-        // Fallback: share map center
-        const c = mapRef.current?.getCenter() ?? { lat: 25.383, lng: 68.356 };
-        const link = `https://maps.google.com/?q=${c.lat.toFixed(6)},${c.lng.toFixed(6)}`;
-        await navigator.clipboard.writeText(link).catch(() => {});
-        showToast("Map center link copied!");
-      }
-    } finally {
-      setShareLoading(false);
-    }
-  }, [showToast]);
-
   /* ---- Onboarding ---- */
   const finishOnboarding = useCallback(() => {
     window.localStorage.setItem("atlasmind:onboarded", "1");
     setOnboardStep(-1);
   }, []);
 
-  /* ---- Waypoint labels ---- */
-  const waypointLabels = ["From", "Stop 1", "Stop 2", "Stop 3", "Stop 4", "To"];
-  function waypointLabel(index: number, total: number): string {
-    if (total === 2) return index === 0 ? "From" : "To";
-    if (index === 0) return "From";
-    if (index === total - 1) return "To";
-    return `Stop ${index}`;
-  }
-
   /* ---------- render ---------- */
   return (
     <div style={{ position: "relative", height: "100vh", width: "100vw", overflow: "hidden" }}>
       <div className="am-glow am-glow-purple" />
       <div className="am-glow am-glow-cyan" />
-
-      {/* Offline banner */}
-      {isOffline && (
-        <div
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: 0,
-            padding: "8px 16px",
-            background: "rgba(255,45,85,0.9)",
-            backdropFilter: "blur(8px)",
-            color: "#fff",
-            fontSize: 13,
-            fontWeight: 600,
-            textAlign: "center",
-            zIndex: 1000,
-          }}
-          role="alert"
-        >
-          You are offline — some features unavailable
-        </div>
-      )}
 
       <div className={`am-map-wrap ${is3D ? "am-3d" : ""}`}>
         <div ref={mapEl} style={{ position: "absolute", inset: 0 }} />
@@ -957,23 +817,22 @@ export default function AtlasMindApp() {
         className="am-glass am-anim-in"
         style={{
           position: "absolute",
-          top: isOffline ? 44 : 18,
+          top: 18,
           left: 18,
           right: 18,
           padding: "10px 14px",
           display: "flex",
           alignItems: "center",
-          gap: 10,
+          gap: 14,
           zIndex: 500,
-          flexWrap: "wrap",
         }}
       >
-        <AtlasMindLogo size={36} />
+        <AtlasMindLogo size={38} />
         <div style={{ lineHeight: 1.1 }}>
-          <div className="am-font-display am-accent-text" style={{ fontSize: 18, fontWeight: 700 }}>
+          <div className="am-font-display am-accent-text" style={{ fontSize: 20, fontWeight: 700 }}>
             AtlasMind
           </div>
-          <div style={{ color: "var(--am-muted)", fontSize: 10, letterSpacing: ".02em" }}>
+          <div style={{ color: "var(--am-muted)", fontSize: 11, letterSpacing: ".02em" }}>
             Beyond Maps. Beyond Navigation.
           </div>
         </div>
@@ -982,7 +841,7 @@ export default function AtlasMindApp() {
           className="am-btn am-btn-icon"
           onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
           title="Toggle theme"
-          aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          aria-label="Toggle theme"
         >
           {theme === "dark" ? "☀️" : "🌙"}
         </button>
@@ -990,25 +849,15 @@ export default function AtlasMindApp() {
           className={`am-btn am-btn-icon ${is3D ? "am-btn-active" : ""}`}
           onClick={() => setIs3D((v) => !v)}
           title="Toggle 3D view"
-          aria-label={is3D ? "Disable 3D view" : "Enable 3D view"}
-          aria-pressed={is3D}
+          aria-label="3D view"
         >
           3D
         </button>
         <button
           className="am-btn am-btn-icon"
-          onClick={shareLocation}
-          title="Share my location"
-          aria-label="Share my location"
-          disabled={shareLoading}
-        >
-          {shareLoading ? <span className="am-spinner" /> : "📤"}
-        </button>
-        <button
-          className="am-btn am-btn-icon"
           onClick={locateMe}
           title="Locate me"
-          aria-label="Center map on my location"
+          aria-label="Locate me"
         >
           🎯
         </button>
@@ -1016,7 +865,6 @@ export default function AtlasMindApp() {
           className="am-btn am-btn-danger"
           onClick={() => setSosOpen(true)}
           title="SOS — find nearest help & share location"
-          aria-label="SOS emergency"
         >
           🆘 SOS
         </button>
@@ -1027,7 +875,7 @@ export default function AtlasMindApp() {
         className="am-glass am-anim-in"
         style={{
           position: "absolute",
-          top: isOffline ? 118 : 90,
+          top: 90,
           left: 18,
           right: 18,
           padding: "10px 14px",
@@ -1037,36 +885,32 @@ export default function AtlasMindApp() {
           zIndex: 490,
           animationDelay: ".05s",
         }}
-        role="status"
-        aria-live="polite"
       >
         <div
           style={{
-            width: 32,
-            height: 32,
+            width: 34,
+            height: 34,
             borderRadius: 10,
             background: "var(--am-accent)",
             display: "grid",
             placeItems: "center",
-            fontSize: 16,
-            flexShrink: 0,
+            fontSize: 18,
           }}
-          aria-hidden="true"
         >
           🤖
         </div>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 10, color: "var(--am-muted)", letterSpacing: ".08em", textTransform: "uppercase" }}>
+          <div style={{ fontSize: 11, color: "var(--am-muted)", letterSpacing: ".08em", textTransform: "uppercase" }}>
             AtlasMind · Live Travel Advisory
           </div>
-          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          <div style={{ fontSize: 14, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {advisoryLoading && !advisory
               ? "Analyzing local conditions…"
               : advisory?.headline ?? "Move the map to get a local advisory"}
           </div>
         </div>
         {advisory && (
-          <div className="am-chip" style={{ whiteSpace: "nowrap", fontSize: 11 }}>{advisory.summary}</div>
+          <div className="am-chip" style={{ whiteSpace: "nowrap" }}>{advisory.summary}</div>
         )}
       </div>
 
@@ -1076,16 +920,13 @@ export default function AtlasMindApp() {
           className="am-glass am-anim-fade"
           style={{
             position: "absolute",
-            top: isOffline ? 178 : 152,
+            top: 160,
             left: "50%",
             transform: "translateX(-50%)",
             padding: "10px 16px",
             fontSize: 13,
             zIndex: 600,
-            whiteSpace: "nowrap",
           }}
-          role="status"
-          aria-live="polite"
         >
           {toast}
         </div>
@@ -1101,37 +942,27 @@ export default function AtlasMindApp() {
           right: 18,
           padding: 14,
           zIndex: 500,
-          maxWidth: 800,
+          maxWidth: 760,
           marginInline: "auto",
           animationDelay: ".1s",
         }}
       >
-        {/* Tab bar */}
-        <div
-          style={{ display: "flex", gap: 5, marginBottom: 12, overflowX: "auto" }}
-          className="am-scroll"
-          role="tablist"
-          aria-label="Navigation tabs"
-        >
+        <div style={{ display: "flex", gap: 6, marginBottom: 12, overflowX: "auto" }} className="am-scroll">
           {([
             ["search", "🔍 Search"],
             ["route", "🧭 Route"],
             ["nearby", "📍 Nearby"],
             ["community", "📢 Reports"],
             ["places", "✨ Places"],
-            ["favorites", "★ Saved"],
+            ["favorites", "★ Favorites"],
             ["history", "🕘 History"],
             ["measure", "📏 Measure"],
-            ["tips", "💡 Tips"],
+            ["tips", "💡 Local Tips"],
             ["traffic", "🚦 Traffic"],
-            ["roadmap", "🗺 Roadmap"],
           ] as [Tab, string][]).map(([k, label]) => (
             <button
               key={k}
-              role="tab"
-              aria-selected={tab === k}
               className={`am-btn ${tab === k ? "am-btn-active" : ""}`}
-              style={{ whiteSpace: "nowrap", fontSize: 12 }}
               onClick={() => setTab(k)}
             >
               {label}
@@ -1139,11 +970,13 @@ export default function AtlasMindApp() {
           ))}
         </div>
 
-        {/* ---- Search tab ---- */}
         {tab === "search" && (
-          <div className="am-anim-fade" role="tabpanel" aria-label="Search">
+          <div className="am-anim-fade">
             <form
-              onSubmit={(e) => { e.preventDefault(); doSearch(searchQ); }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                doSearch(searchQ);
+              }}
               style={{ display: "flex", gap: 8 }}
             >
               <input
@@ -1151,38 +984,24 @@ export default function AtlasMindApp() {
                 placeholder="Search a place, city, or address…"
                 value={searchQ}
                 onChange={(e) => setSearchQ(e.target.value)}
-                aria-label="Search query"
-                aria-describedby={searchError ? "search-error" : undefined}
               />
               <VoiceSearch
-                onTranscript={(text) => { setSearchQ(text); doSearch(text); }}
+                onTranscript={(text) => {
+                  setSearchQ(text);
+                  doSearch(text);
+                }}
               />
-              <button className="am-btn am-btn-primary" type="submit" disabled={searchLoading} aria-label="Run search">
-                {searchLoading ? <span className="am-spinner" aria-label="Searching" /> : "Search"}
+              <button className="am-btn am-btn-primary" type="submit" disabled={searchLoading}>
+                {searchLoading ? <span className="am-spinner" /> : "Search"}
               </button>
             </form>
             {searchError && (
-              <div id="search-error" style={{ marginTop: 10, color: "#ff8a95", fontSize: 13 }} role="alert">
-                {searchError}
-              </div>
-            )}
-            {searchLoading && !searchError && searchResults.length === 0 && (
-              <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
-                <span className="am-spinner" aria-hidden="true" /> Searching…
-              </div>
-            )}
-            {!searchLoading && !searchError && searchResults.length === 0 && searchQ.trim().length >= 2 && (
-              <div style={{ marginTop: 14, textAlign: "center", color: "var(--am-muted)" }}>
-                <div style={{ fontSize: 28 }} aria-hidden="true">🔍</div>
-                <div style={{ fontSize: 13, marginTop: 4 }}>Start typing to search for a place</div>
-              </div>
+              <div style={{ marginTop: 10, color: "#ff8a95", fontSize: 13 }}>{searchError}</div>
             )}
             {searchResults.length > 0 && (
               <div
                 className="am-scroll"
                 style={{ marginTop: 10, maxHeight: 220, overflowY: "auto", display: "grid", gap: 8 }}
-                role="listbox"
-                aria-label="Search results"
               >
                 {searchResults.map((r) => {
                   const lat = parseFloat(r.lat);
@@ -1194,10 +1013,6 @@ export default function AtlasMindApp() {
                       key={r.place_id}
                       className="am-card"
                       onClick={() => flyToResult(r)}
-                      role="option"
-                      aria-selected="false"
-                      tabIndex={0}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") flyToResult(r); }}
                     >
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <div style={{ minWidth: 0, flex: 1 }}>
@@ -1216,8 +1031,6 @@ export default function AtlasMindApp() {
                             toggleFavorite(r.display_name.split(",")[0], lat, lng);
                           }}
                           title={isFav ? "Remove from favorites" : "Add to favorites"}
-                          aria-label={isFav ? "Remove from favorites" : "Add to favorites"}
-                          aria-pressed={isFav}
                         >
                           {isFav ? "★" : "☆"}
                         </button>
@@ -1230,163 +1043,82 @@ export default function AtlasMindApp() {
           </div>
         )}
 
-        {/* ---- Route tab (multi-stop) ---- */}
         {tab === "route" && (
-          <div className="am-anim-fade" role="tabpanel" aria-label="Route planner">
-            <div style={{ display: "grid", gap: 8 }}>
-              {waypoints.map((wp, i) => (
-                <div key={wp.id} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <span
-                    style={{
-                      width: 22,
-                      height: 22,
-                      borderRadius: 6,
-                      background: i === 0 ? "#6c5ce7" : i === waypoints.length - 1 ? "#00d4ff" : "#f5b301",
-                      display: "grid",
-                      placeItems: "center",
-                      fontSize: 10,
-                      fontWeight: 700,
-                      color: "#fff",
-                      flexShrink: 0,
-                    }}
-                    aria-hidden="true"
-                  >
-                    {String.fromCharCode(65 + i)}
-                  </span>
-                  <input
-                    className="am-input"
-                    placeholder={waypointLabel(i, waypoints.length)}
-                    value={wp.query}
-                    onChange={(e) => updateWaypoint(wp.id, { query: e.target.value, ll: null })}
-                    aria-label={`Waypoint ${waypointLabel(i, waypoints.length)}`}
-                    style={{ flex: 1, minWidth: 0 }}
-                  />
-                  <button
-                    className="am-btn am-btn-icon"
-                    onClick={() => useMyLocationAsWaypoint(wp.id)}
-                    title="Use my location"
-                    aria-label="Use my current location for this stop"
-                    style={{ flexShrink: 0 }}
-                  >
-                    🎯
-                  </button>
-                  {i > 0 && (
-                    <button
-                      className="am-btn am-btn-icon"
-                      onClick={() => moveWaypoint(wp.id, -1)}
-                      title="Move stop up"
-                      aria-label="Move stop up"
-                      disabled={i === 0}
-                      style={{ flexShrink: 0, fontSize: 11 }}
-                    >
-                      ▲
-                    </button>
-                  )}
-                  {i < waypoints.length - 1 && (
-                    <button
-                      className="am-btn am-btn-icon"
-                      onClick={() => moveWaypoint(wp.id, 1)}
-                      title="Move stop down"
-                      aria-label="Move stop down"
-                      style={{ flexShrink: 0, fontSize: 11 }}
-                    >
-                      ▼
-                    </button>
-                  )}
-                  {waypoints.length > 2 && (
-                    <button
-                      className="am-btn am-btn-icon"
-                      onClick={() => removeWaypoint(wp.id)}
-                      title="Remove stop"
-                      aria-label="Remove this stop"
-                      style={{ flexShrink: 0 }}
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-              ))}
+          <div className="am-anim-fade">
+            <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr" }}>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  className="am-input"
+                  placeholder="From"
+                  value={routeFromQ}
+                  onChange={(e) => {
+                    setRouteFromQ(e.target.value);
+                    setRouteFrom(null);
+                  }}
+                />
+                <button className="am-btn am-btn-icon" onClick={useMyLocationAsOrigin} title="Use my location">
+                  🎯
+                </button>
+              </div>
+              <input
+                className="am-input"
+                placeholder="To"
+                value={routeToQ}
+                onChange={(e) => {
+                  setRouteToQ(e.target.value);
+                  setRouteTo(null);
+                }}
+              />
             </div>
             <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
-              {waypoints.length < 6 && (
-                <button className="am-btn" onClick={addWaypoint} aria-label="Add another stop">
-                  + Add stop
-                </button>
-              )}
-              <button
-                className="am-btn am-btn-primary"
-                onClick={buildRoute}
-                disabled={routeLoading}
-                aria-label="Calculate route"
-              >
-                {routeLoading ? <span className="am-spinner" aria-label="Calculating" /> : "🧭 Get directions"}
+              <button className="am-btn am-btn-primary" onClick={buildRoute} disabled={routeLoading}>
+                {routeLoading ? <span className="am-spinner" /> : "🧭 Get directions"}
               </button>
-              <button className="am-btn" onClick={clearRoute} aria-label="Clear route">
-                Clear
-              </button>
+              <button className="am-btn" onClick={clearRoute}>Clear</button>
               {routeInfo && (
                 <>
                   <span className="am-chip">🛣️ {fmtDistance(routeInfo.distance)}</span>
                   <span className="am-chip">⏱ {fmtDuration(routeInfo.duration)}</span>
-                  {waypoints.length > 2 && (
-                    <span className="am-chip">📍 {waypoints.length} stops</span>
-                  )}
                 </>
               )}
             </div>
             {routeError && (
-              <div style={{ marginTop: 10, color: "#ff8a95", fontSize: 13 }} role="alert">{routeError}</div>
+              <div style={{ marginTop: 10, color: "#ff8a95", fontSize: 13 }}>{routeError}</div>
             )}
           </div>
         )}
 
-        {/* ---- Nearby tab ---- */}
         {tab === "nearby" && (
-          <div className="am-anim-fade" role="tabpanel" aria-label="Nearby places">
+          <div className="am-anim-fade">
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               {NEARBY.map((c) => (
                 <button
                   key={c.key}
                   className={`am-btn ${nearbyCat === c.key ? "am-btn-active" : ""}`}
                   onClick={() => runNearby(c)}
-                  aria-pressed={nearbyCat === c.key}
-                  aria-label={`Find nearby ${c.label}`}
                 >
-                  <span aria-hidden="true">{c.icon}</span> {c.label}
+                  <span>{c.icon}</span> {c.label}
                 </button>
               ))}
             </div>
             {nearbyLoading && (
               <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)" }}>
-                <span className="am-spinner" aria-hidden="true" /> Scanning the current map area…
+                <span className="am-spinner" /> Scanning the current map area…
               </div>
             )}
             {nearbyError && (
-              <div style={{ marginTop: 10, color: "#ff8a95", fontSize: 13 }} role="alert">{nearbyError}</div>
-            )}
-            {!nearbyLoading && !nearbyError && !nearbyCat && (
-              <div style={{ marginTop: 14, textAlign: "center", color: "var(--am-muted)" }}>
-                <div style={{ fontSize: 28 }} aria-hidden="true">📍</div>
-                <div style={{ fontSize: 13, marginTop: 4 }}>Select a category to discover nearby places</div>
-              </div>
+              <div style={{ marginTop: 10, color: "#ff8a95", fontSize: 13 }}>{nearbyError}</div>
             )}
             {nearbyResults.length > 0 && (
               <div
                 className="am-scroll"
                 style={{ marginTop: 10, maxHeight: 200, overflowY: "auto", display: "grid", gap: 6 }}
-                role="list"
-                aria-label="Nearby results"
               >
                 {nearbyResults.slice(0, 30).map((r) => (
-                  <div
-                    key={r.place_id}
-                    className="am-card"
-                    onClick={() => flyToResult(r)}
-                    role="listitem"
-                    tabIndex={0}
-                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") flyToResult(r); }}
-                  >
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{r.display_name.split(",")[0]}</div>
+                  <div key={r.place_id} className="am-card" onClick={() => flyToResult(r)}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>
+                      {r.display_name.split(",")[0]}
+                    </div>
                     <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
                       {r.display_name.split(",").slice(1, 4).join(",").trim()}
                     </div>
@@ -1397,48 +1129,46 @@ export default function AtlasMindApp() {
           </div>
         )}
 
-        {/* ---- Community reports tab ---- */}
         {tab === "community" && (
-          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }} role="tabpanel" aria-label="Community reports">
+          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>📢 Community reports</div>
-              <button className="am-btn am-btn-icon" onClick={loadReports} title="Refresh" aria-label="Refresh reports">↻</button>
+              <button
+                className="am-btn am-btn-icon"
+                onClick={loadReports}
+                title="Refresh"
+              >
+                ↻
+              </button>
             </div>
             <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
               Tap the map to add a report (road damage, flood, construction, parking, safety, facilities).
             </div>
             {reportsLoading && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
-                <span className="am-spinner" aria-hidden="true" /> Loading reports…
+                <span className="am-spinner" /> Loading reports…
               </div>
             )}
             {!reportsLoading && reports.length === 0 && (
-              <div style={{ textAlign: "center", padding: "16px 0", color: "var(--am-muted)" }}>
-                <div style={{ fontSize: 32 }} aria-hidden="true">📋</div>
-                <div style={{ fontSize: 13, marginTop: 6, fontWeight: 500 }}>No reports yet</div>
-                <div style={{ fontSize: 12, marginTop: 4 }}>Tap the map to add the first one.</div>
+              <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
+                No reports yet — tap the map to add the first one.
               </div>
             )}
             {reports.length > 0 && (
-              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }} role="list">
+              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }}>
                 {reports.map((r) => {
                   const meta = reportMeta(r.category);
                   return (
-                    <div
-                      key={r.id}
-                      className="am-card"
-                      onClick={() => flyToCoords(r.lat, r.lng)}
-                      role="listitem"
-                      tabIndex={0}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") flyToCoords(r.lat, r.lng); }}
-                    >
+                    <div key={r.id} className="am-card" onClick={() => flyToCoords(r.lat, r.lng)}>
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13, fontWeight: 600 }}>
                             {meta.icon} {meta.label}
                           </div>
                           {r.description && (
-                            <div style={{ fontSize: 11, color: "var(--am-muted)", marginTop: 2 }}>{r.description}</div>
+                            <div style={{ fontSize: 11, color: "var(--am-muted)", marginTop: 2 }}>
+                              {r.description}
+                            </div>
                           )}
                           <div style={{ fontSize: 10, color: "var(--am-muted)", marginTop: 2 }}>
                             {new Date(r.created_at).toLocaleString()} · {r.lat.toFixed(4)}, {r.lng.toFixed(4)}
@@ -1448,7 +1178,6 @@ export default function AtlasMindApp() {
                           className="am-btn am-btn-icon"
                           onClick={(e) => { e.stopPropagation(); handleDeleteReport(r.id); }}
                           title="Delete report"
-                          aria-label="Delete this report"
                         >
                           🗑
                         </button>
@@ -1461,49 +1190,41 @@ export default function AtlasMindApp() {
           </div>
         )}
 
-        {/* ---- Places tab ---- */}
         {tab === "places" && (
-          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }} role="tabpanel" aria-label="Community places">
+          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>✨ Community places</div>
-              <button className="am-btn am-btn-icon" onClick={loadPlaces} title="Refresh" aria-label="Refresh places">↻</button>
+              <button className="am-btn am-btn-icon" onClick={loadPlaces} title="Refresh">↻</button>
             </div>
             <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
               Add missing places via the map. Places become Verified after 3 community confirmations.
             </div>
             {placesLoading && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
-                <span className="am-spinner" aria-hidden="true" /> Loading places…
+                <span className="am-spinner" /> Loading places…
               </div>
             )}
             {!placesLoading && places.length === 0 && (
-              <div style={{ textAlign: "center", padding: "16px 0", color: "var(--am-muted)" }}>
-                <div style={{ fontSize: 32 }} aria-hidden="true">🗺️</div>
-                <div style={{ fontSize: 13, marginTop: 6, fontWeight: 500 }}>No places added yet</div>
-                <div style={{ fontSize: 12, marginTop: 4 }}>Tap the map and choose "Add place".</div>
+              <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
+                No places added yet — tap the map and choose "Add place".
               </div>
             )}
             {places.length > 0 && (
-              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }} role="list">
+              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }}>
                 {places.map((p) => {
                   const verified = p.status === "verified";
                   const alreadyConfirmed = confirmedPlacesRef.current.has(p.id);
                   return (
-                    <div
-                      key={p.id}
-                      className="am-card"
-                      onClick={() => flyToCoords(p.lat, p.lng)}
-                      role="listitem"
-                      tabIndex={0}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") flyToCoords(p.lat, p.lng); }}
-                    >
+                    <div key={p.id} className="am-card" onClick={() => flyToCoords(p.lat, p.lng)}>
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>
+                            {p.name}
+                          </div>
                           <div style={{ fontSize: 11, color: "var(--am-muted)", marginTop: 2, textTransform: "capitalize" }}>
                             {p.category} · {p.lat.toFixed(4)}, {p.lng.toFixed(4)}
                           </div>
-                          <div style={{ marginTop: 6 }}>
+                          <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center" }}>
                             <span
                               className="am-chip"
                               style={{
@@ -1521,7 +1242,6 @@ export default function AtlasMindApp() {
                             style={{ flexShrink: 0 }}
                             disabled={alreadyConfirmed}
                             onClick={(e) => { e.stopPropagation(); handleConfirmPlace(p.id); }}
-                            aria-label={alreadyConfirmed ? "Already confirmed" : "Confirm this place"}
                           >
                             {alreadyConfirmed ? "✓ Confirmed" : "Confirm"}
                           </button>
@@ -1535,33 +1255,26 @@ export default function AtlasMindApp() {
           </div>
         )}
 
-        {/* ---- Favorites tab ---- */}
         {tab === "favorites" && (
-          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }} role="tabpanel" aria-label="Saved favorites">
-            <div style={{ fontSize: 13, fontWeight: 600 }}>★ Saved places</div>
+          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>★ Favorites</div>
+            <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
+              Tap ☆ on any search result to save it here.
+            </div>
             {favoritesLoading && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
-                <span className="am-spinner" aria-hidden="true" /> Loading favorites…
+                <span className="am-spinner" /> Loading favorites…
               </div>
             )}
             {!favoritesLoading && favorites.length === 0 && (
-              <div style={{ textAlign: "center", padding: "16px 0", color: "var(--am-muted)" }}>
-                <div style={{ fontSize: 32 }} aria-hidden="true">⭐</div>
-                <div style={{ fontSize: 13, marginTop: 6, fontWeight: 500 }}>No saved places yet</div>
-                <div style={{ fontSize: 12, marginTop: 4 }}>Search a place and tap ☆ to save it here.</div>
+              <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
+                No favorites yet — search a place and tap ☆ to save it.
               </div>
             )}
             {favorites.length > 0 && (
-              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }} role="list">
+              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }}>
                 {favorites.map((f) => (
-                  <div
-                    key={f.id}
-                    className="am-card"
-                    onClick={() => flyToCoords(f.lat, f.lng)}
-                    role="listitem"
-                    tabIndex={0}
-                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") flyToCoords(f.lat, f.lng); }}
-                  >
+                  <div key={f.id} className="am-card" onClick={() => flyToCoords(f.lat, f.lng)}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 13, fontWeight: 600 }}>★ {f.name}</div>
@@ -1571,9 +1284,11 @@ export default function AtlasMindApp() {
                       </div>
                       <button
                         className="am-btn am-btn-icon"
-                        onClick={(e) => { e.stopPropagation(); removeFavorite(f.id).then(() => loadFavorites()); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeFavorite(f.id).then(() => loadFavorites());
+                        }}
                         title="Remove favorite"
-                        aria-label={`Remove ${f.name} from favorites`}
                       >
                         🗑
                       </button>
@@ -1585,9 +1300,8 @@ export default function AtlasMindApp() {
           </div>
         )}
 
-        {/* ---- History tab ---- */}
         {tab === "history" && (
-          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }} role="tabpanel" aria-label="Route history">
+          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>🕘 Route history</div>
               {routeHistory.length > 0 && (
@@ -1595,7 +1309,6 @@ export default function AtlasMindApp() {
                   className="am-btn am-btn-icon"
                   onClick={() => { clearRouteHistory().then(() => loadRouteHistory()); }}
                   title="Clear history"
-                  aria-label="Clear all route history"
                 >
                   🗑
                 </button>
@@ -1603,20 +1316,18 @@ export default function AtlasMindApp() {
             </div>
             {historyLoading && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--am-muted)", fontSize: 13 }}>
-                <span className="am-spinner" aria-hidden="true" /> Loading history…
+                <span className="am-spinner" /> Loading history…
               </div>
             )}
             {!historyLoading && routeHistory.length === 0 && (
-              <div style={{ textAlign: "center", padding: "16px 0", color: "var(--am-muted)" }}>
-                <div style={{ fontSize: 32 }} aria-hidden="true">🧭</div>
-                <div style={{ fontSize: 13, marginTop: 6, fontWeight: 500 }}>No routes yet</div>
-                <div style={{ fontSize: 12, marginTop: 4 }}>Plan a route in the Route tab to log it here.</div>
+              <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
+                No routes yet — plan a route in the Route tab to log it here.
               </div>
             )}
             {routeHistory.length > 0 && (
-              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }} role="list">
+              <div className="am-scroll" style={{ maxHeight: 240, overflowY: "auto", display: "grid", gap: 6 }}>
                 {routeHistory.map((row) => (
-                  <div key={row.id} className="am-card" role="listitem">
+                  <div key={row.id} className="am-card">
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 13, fontWeight: 600 }}>
@@ -1630,7 +1341,6 @@ export default function AtlasMindApp() {
                         className="am-btn am-btn-primary"
                         style={{ flexShrink: 0 }}
                         onClick={() => rerunHistoryRoute(row)}
-                        aria-label={`Re-run route from ${row.from_label} to ${row.to_label}`}
                       >
                         ↻ Re-run
                       </button>
@@ -1642,9 +1352,8 @@ export default function AtlasMindApp() {
           </div>
         )}
 
-        {/* ---- Measure tab ---- */}
         {tab === "measure" && (
-          <div className="am-anim-fade" style={{ display: "grid", gap: 10 }} role="tabpanel" aria-label="Distance measurement">
+          <div className="am-anim-fade" style={{ display: "grid", gap: 10 }}>
             <div style={{ fontSize: 13, fontWeight: 600 }}>📏 Distance measurement</div>
             <div style={{ fontSize: 11, color: "var(--am-muted)" }}>
               Toggle, then click points on the map to measure the total path distance.
@@ -1653,15 +1362,14 @@ export default function AtlasMindApp() {
               <button
                 className={`am-btn ${measureState?.active ? "am-btn-active" : ""}`}
                 onClick={toggleMeasure}
-                aria-pressed={measureState?.active ?? false}
               >
                 {measureState?.active ? "⏸ Stop measuring" : "📏 Start measuring"}
               </button>
               {measureState && measureState.points.length > 0 && (
-                <button className="am-btn" onClick={resetMeasure} aria-label="Clear measurement">Clear</button>
+                <button className="am-btn" onClick={resetMeasure}>Clear</button>
               )}
             </div>
-            {measureState && measureState.points.length > 0 ? (
+            {measureState && measureState.points.length > 0 && (
               <div className="am-card" style={{ cursor: "default" }}>
                 <div style={{ fontSize: 12, color: "var(--am-muted)" }}>
                   {measureState.points.length} point{measureState.points.length > 1 ? "s" : ""}
@@ -1670,17 +1378,12 @@ export default function AtlasMindApp() {
                   {fmtMeasure(measureState.total)}
                 </div>
               </div>
-            ) : (
-              <div style={{ textAlign: "center", padding: "8px 0", color: "var(--am-muted)" }}>
-                <div style={{ fontSize: 13 }}>Start measuring, then click points on the map</div>
-              </div>
             )}
           </div>
         )}
 
-        {/* ---- Tips tab ---- */}
         {tab === "tips" && (
-          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }} role="tabpanel" aria-label="Local tips">
+          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }}>
             <div className="am-card" style={{ cursor: "default" }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>💡 Local advisory</div>
               <div style={{ fontSize: 12, color: "var(--am-muted)", marginTop: 4 }}>
@@ -1688,105 +1391,21 @@ export default function AtlasMindApp() {
               </div>
             </div>
             <div className="am-card" style={{ cursor: "default" }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>🕒 Best times to travel</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>🕒 Best times</div>
               <div style={{ fontSize: 12, color: "var(--am-muted)", marginTop: 4 }}>
                 Travel between 10:00–16:00 for the lightest urban traffic in most regions.
               </div>
             </div>
             <div className="am-card" style={{ cursor: "default" }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>🛡️ Safety tips</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>🛡️ Safety</div>
               <div style={{ fontSize: 12, color: "var(--am-muted)", marginTop: 4 }}>
-                Prefer main roads at night. Use the 📤 share button to send your location to a contact.
-              </div>
-            </div>
-            <div className="am-card" style={{ cursor: "default" }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>🌐 Map tips</div>
-              <div style={{ fontSize: 12, color: "var(--am-muted)", marginTop: 4 }}>
-                Tap anywhere on the map to add a community report or place. Use 3D mode for a perspective view.
+                Prefer main roads at night. Share your live location with a trusted contact.
               </div>
             </div>
           </div>
         )}
 
-        {/* ---- Traffic tab ---- */}
         {tab === "traffic" && <TrafficDashboard active={tab === "traffic"} />}
-
-        {/* ---- Roadmap tab ---- */}
-        {tab === "roadmap" && (
-          <div className="am-anim-fade" style={{ display: "grid", gap: 8 }} role="tabpanel" aria-label="Coming soon roadmap">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>🗺 Coming Soon</div>
-              <span
-                className="am-chip"
-                style={{ fontSize: 10, color: "#f5b301", borderColor: "rgba(245,179,1,0.4)" }}
-              >
-                Future vision — not yet available
-              </span>
-            </div>
-            <div style={{ fontSize: 11, color: "var(--am-muted)", marginBottom: 4 }}>
-              These are ideas we're exploring for future versions of AtlasMind:
-            </div>
-            {[
-              {
-                icon: "🏙️",
-                title: "Full 3D Building Rendering",
-                desc: "Real photorealistic 3D city models with building heights, facades, and shadows using MapLibre GL or CesiumJS.",
-              },
-              {
-                icon: "🧠",
-                title: "Natural Language Search",
-                desc: "Ask the map anything: \"Find a quiet café near a park that opens before 8am\" — powered by LLM-based query parsing.",
-              },
-              {
-                icon: "📦",
-                title: "City-Wide Offline Map Packs",
-                desc: "Download full cities for offline use including turn-by-turn navigation without any internet connection.",
-              },
-              {
-                icon: "🚌",
-                title: "Real-Time Transit Layer",
-                desc: "Live bus and train positions overlaid on the map using GTFS-Realtime feeds where available.",
-              },
-              {
-                icon: "🤖",
-                title: "AI Trip Planner",
-                desc: "Describe your trip goal and let AtlasMind plan a full multi-day itinerary with stops, timing, and alternatives.",
-              },
-              {
-                icon: "📡",
-                title: "Live Crowd-Sourced Traffic",
-                desc: "Aggregate anonymized speed data from AtlasMind users to show real-time congestion on a city-wide heatmap.",
-              },
-            ].map((item) => (
-              <div key={item.title} className="am-card" style={{ cursor: "default" }}>
-                <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                  <div
-                    style={{
-                      width: 34,
-                      height: 34,
-                      borderRadius: 10,
-                      background: "rgba(108,92,231,0.15)",
-                      border: "1px solid rgba(108,92,231,0.3)",
-                      display: "grid",
-                      placeItems: "center",
-                      fontSize: 18,
-                      flexShrink: 0,
-                    }}
-                    aria-hidden="true"
-                  >
-                    {item.icon}
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{item.title}</div>
-                    <div style={{ fontSize: 11, color: "var(--am-muted)", marginTop: 3, lineHeight: 1.5 }}>
-                      {item.desc}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* Onboarding */}
@@ -1803,104 +1422,67 @@ export default function AtlasMindApp() {
             placeItems: "center",
             padding: 20,
           }}
-          role="dialog"
-          aria-modal="true"
-          aria-label={
-            onboardStep === 0
-              ? "Welcome to AtlasMind"
-              : onboardStep === 1
-              ? "Enable location"
-              : "Choose your theme"
-          }
         >
           <div
             className="am-glass am-anim-in"
-            style={{ maxWidth: 440, width: "100%", padding: 28, textAlign: "center" }}
+            style={{ maxWidth: 460, width: "100%", padding: 28, textAlign: "center" }}
           >
             {onboardStep === 0 && (
               <>
                 <div style={{ display: "grid", placeItems: "center", marginBottom: 14 }}>
                   <AtlasMindLogo size={64} />
                 </div>
-                <h2 className="am-font-display am-accent-text" style={{ fontSize: 26, margin: 0 }}>
+                <h2 className="am-font-display am-accent-text" style={{ fontSize: 28, margin: 0 }}>
                   Welcome to AtlasMind
                 </h2>
-                <p style={{ color: "var(--am-muted)", marginTop: 8, fontSize: 14, lineHeight: 1.6 }}>
+                <p style={{ color: "var(--am-muted)", marginTop: 8, fontSize: 14 }}>
                   An AI-powered mapping platform for route planning, nearby discovery, and live travel intelligence.
+                </p>
+                <button
+                  className="am-btn am-btn-primary"
+                  style={{ marginTop: 18, width: "100%" }}
+                  onClick={() => setOnboardStep(1)}
+                >
+                  Get started →
+                </button>
+              </>
+            )}
+            {onboardStep === 1 && (
+              <>
+                <div style={{ fontSize: 40 }}>📍</div>
+                <h2 className="am-font-display" style={{ fontSize: 22, marginTop: 8 }}>
+                  Enable location
+                </h2>
+                <p style={{ color: "var(--am-muted)", marginTop: 6, fontSize: 14 }}>
+                  Grant location access to center the map on you, show nearby places, and enable SOS.
                 </p>
                 <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
                   <button
                     className="am-btn"
                     style={{ flex: 1 }}
-                    onClick={finishOnboarding}
+                    onClick={() => setOnboardStep(2)}
                   >
                     Skip
                   </button>
                   <button
                     className="am-btn am-btn-primary"
                     style={{ flex: 1 }}
-                    onClick={() => setOnboardStep(1)}
-                    autoFocus
-                  >
-                    Get started →
-                  </button>
-                </div>
-                <div style={{ display: "flex", gap: 6, justifyContent: "center", marginTop: 16 }}>
-                  {[0, 1, 2].map((i) => (
-                    <div
-                      key={i}
-                      style={{
-                        width: i === 0 ? 20 : 8,
-                        height: 8,
-                        borderRadius: 4,
-                        background: i === 0 ? "var(--am-accent-1)" : "var(--am-border)",
-                        transition: "all .3s",
-                      }}
-                    />
-                  ))}
-                </div>
-              </>
-            )}
-            {onboardStep === 1 && (
-              <>
-                <div style={{ fontSize: 44 }} aria-hidden="true">📍</div>
-                <h2 className="am-font-display" style={{ fontSize: 22, marginTop: 8 }}>Enable location</h2>
-                <p style={{ color: "var(--am-muted)", marginTop: 6, fontSize: 14, lineHeight: 1.6 }}>
-                  Grant location access to center the map on you, show nearby places, and enable SOS.
-                </p>
-                <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
-                  <button className="am-btn" style={{ flex: 1 }} onClick={() => setOnboardStep(2)}>
-                    Skip
-                  </button>
-                  <button
-                    className="am-btn am-btn-primary"
-                    style={{ flex: 1 }}
-                    autoFocus
-                    onClick={() => { locateMe(); setOnboardStep(2); }}
+                    onClick={() => {
+                      locateMe();
+                      setOnboardStep(2);
+                    }}
                   >
                     Allow
                   </button>
-                </div>
-                <div style={{ display: "flex", gap: 6, justifyContent: "center", marginTop: 16 }}>
-                  {[0, 1, 2].map((i) => (
-                    <div
-                      key={i}
-                      style={{
-                        width: i === 1 ? 20 : 8,
-                        height: 8,
-                        borderRadius: 4,
-                        background: i === 1 ? "var(--am-accent-1)" : "var(--am-border)",
-                        transition: "all .3s",
-                      }}
-                    />
-                  ))}
                 </div>
               </>
             )}
             {onboardStep === 2 && (
               <>
-                <div style={{ fontSize: 44 }} aria-hidden="true">🎨</div>
-                <h2 className="am-font-display" style={{ fontSize: 22, marginTop: 8 }}>Choose your theme</h2>
+                <div style={{ fontSize: 40 }}>🎨</div>
+                <h2 className="am-font-display" style={{ fontSize: 22, marginTop: 8 }}>
+                  Choose your theme
+                </h2>
                 <p style={{ color: "var(--am-muted)", marginTop: 6, fontSize: 14 }}>
                   You can switch anytime from the top bar.
                 </p>
@@ -1909,7 +1491,6 @@ export default function AtlasMindApp() {
                     className={`am-btn ${theme === "dark" ? "am-btn-active" : ""}`}
                     style={{ flex: 1 }}
                     onClick={() => setTheme("dark")}
-                    aria-pressed={theme === "dark"}
                   >
                     🌙 Dark
                   </button>
@@ -1917,7 +1498,6 @@ export default function AtlasMindApp() {
                     className={`am-btn ${theme === "light" ? "am-btn-active" : ""}`}
                     style={{ flex: 1 }}
                     onClick={() => setTheme("light")}
-                    aria-pressed={theme === "light"}
                   >
                     ☀️ Light
                   </button>
@@ -1926,35 +1506,23 @@ export default function AtlasMindApp() {
                   className="am-btn am-btn-primary"
                   style={{ marginTop: 14, width: "100%" }}
                   onClick={finishOnboarding}
-                  autoFocus
                 >
                   Enter AtlasMind
                 </button>
-                <div style={{ display: "flex", gap: 6, justifyContent: "center", marginTop: 16 }}>
-                  {[0, 1, 2].map((i) => (
-                    <div
-                      key={i}
-                      style={{
-                        width: i === 2 ? 20 : 8,
-                        height: 8,
-                        borderRadius: 4,
-                        background: i === 2 ? "var(--am-accent-1)" : "var(--am-border)",
-                        transition: "all .3s",
-                      }}
-                    />
-                  ))}
-                </div>
               </>
             )}
           </div>
         </div>
       )}
 
-      {/* Map action modal */}
+      {/* Map action modal: report / add place */}
       <MapActionModal
         action={mapAction}
         onClose={() => setMapAction(null)}
-        onDone={() => { loadReports(); loadPlaces(); }}
+        onDone={() => {
+          loadReports();
+          loadPlaces();
+        }}
       />
 
       {/* SOS modal */}

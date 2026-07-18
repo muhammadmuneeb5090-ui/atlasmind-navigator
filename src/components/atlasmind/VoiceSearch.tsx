@@ -58,8 +58,6 @@ export function VoiceSearch({
     return (j.text ?? "").trim() || null;
   };
 
-  const MAX_RECORD_MS = 5000;
-
   const startGroqRecording = async () => {
     setError(null);
     setStatus("listening");
@@ -67,32 +65,18 @@ export function VoiceSearch({
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-      // Prefer a compressed codec and cap bitrate to keep the upload small
-      // (Groq returns 413 when the payload is too large).
-      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")
-          ? "audio/ogg;codecs=opus"
-          : "";
-      const mr = new MediaRecorder(stream, {
-        audioBitsPerSecond: 16000,
-        ...(mime ? { mimeType: mime } : {}),
-      });
+      const mr = new MediaRecorder(stream);
       mediaRecorderRef.current = mr;
       mr.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
-      const autoStop = window.setTimeout(() => {
-        if (mr.state !== "inactive") mr.stop();
-      }, MAX_RECORD_MS);
       mr.onstop = async () => {
-        window.clearTimeout(autoStop);
         streamRef.current?.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
         const blob = new Blob(chunksRef.current, { type: mr.mimeType || "audio/webm" });
         if (blob.size === 0) {
           setStatus("idle");
-          startNativeFallback();
+          setError("No audio captured — try again.");
           return;
         }
         setStatus("transcribing");
@@ -103,20 +87,21 @@ export function VoiceSearch({
             setStatus("idle");
           } else {
             setStatus("idle");
-            startNativeFallback();
+            setError("No speech detected — try speaking more clearly.");
           }
-        } catch {
-          // Groq failed for any reason — silently fall back to browser speech
+        } catch (e: any) {
           setStatus("idle");
+          setError(e?.message || "Voice transcription failed — using browser fallback.");
           startNativeFallback();
         }
       };
       mr.start();
     } catch (e: any) {
+      setStatus("error");
       if (e?.name === "NotAllowedError") {
-        setStatus("error");
         setError("Microphone permission denied. Allow mic access to use voice search.");
       } else {
+        setError("Could not access microphone. Trying browser speech recognition…");
         startNativeFallback();
       }
     }
