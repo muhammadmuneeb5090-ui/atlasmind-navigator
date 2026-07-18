@@ -300,3 +300,23 @@ body {
 .am-scroll { scrollbar-width: thin; scrollbar-color: rgba(139,147,163,0.4) transparent; }
 .am-scroll::-webkit-scrollbar { width: 6px; }
 .am-scroll::-webkit-scrollbar-thumb { background: rgba(139,147,163,0.4); border-radius: 3px; }
+
+/* Animated pin drop for newly placed markers */
+@keyframes am-pin-drop {
+  0%  { opacity: 0; transform: translate(-50%,-100%) translateY(-24px) scale(0.7); }
+  60% { opacity: 1; transform: translate(-50%,-100%) translateY(4px) scale(1.08); }
+  80% { transform: translate(-50%,-100%) translateY(-6px) scale(0.96); }
+  100%{ opacity: 1; transform: translate(-50%,-100%) translateY(0) scale(1); }
+}
+.am-pin-drop { animation: am-pin-drop .45s cubic-bezier(.2,.7,.2,1) both; }
+
+/* Responsive bottom panel: allow scrolling on very small screens */
+@media (max-height: 640px) {
+  .am-glass[style*="bottom: 18"] { bottom: 8px !important; left: 8px !important; right: 8px !important; max-height: 55vh; overflow-y: auto; }
+}
+@media (max-width: 480px) {
+  .am-glass[style*="top: 18"] { top: 8px !important; left: 8px !important; right: 8px !important; padding: 8px 10px !important; }
+  .am-glass[style*="bottom: 18"] { bottom: 8px !important; left: 8px !important; right: 8px !important; }
+  .am-btn { padding: 0.45rem 0.6rem; font-size: 0.8rem; border-radius: 10px; }
+  .am-btn-icon { width: 36px; height: 36px; }
+}
