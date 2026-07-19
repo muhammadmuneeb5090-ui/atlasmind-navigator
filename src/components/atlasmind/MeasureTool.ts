@@ -1,4 +1,4 @@
-import type L from "leaflet";
+import L from "leaflet";
 
 export type MeasureState = {
   active: boolean;
